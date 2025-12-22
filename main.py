@@ -6,11 +6,6 @@ import json
 from typing import Optional
 from datetime import datetime
 import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file (optional)
-# Environment variables already set (e.g., from docker-compose) will not be overridden
-load_dotenv(override=False)
 
 # Get credentials from environment
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
@@ -31,7 +26,7 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     if not ADMIN_USERNAME or not ADMIN_PASSWORD:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Authentication not configured. Please set ADMIN_USERNAME and ADMIN_PASSWORD in .env file",
+            detail="Authentication not configured. Please set ADMIN_USERNAME and ADMIN_PASSWORD as environment variables",
             headers={"WWW-Authenticate": "Basic"},
         )
     
