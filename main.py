@@ -1,11 +1,12 @@
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 import httpx
 import json
 from typing import Optional
 from datetime import datetime
 import os
+import asyncio
 import websockets
 from urllib.parse import urlparse
 
@@ -429,26 +430,32 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
             async def forward_to_upstream():
                 try:
                     while True:
-                        # Try to receive as text first, fall back to binary
-                        message_bytes = None
-                        try:
-                            message = await websocket.receive_text()
+                        # Use low-level receive to handle both text and binary
+                        data = await websocket.receive()
+                        
+                        if data["type"] == "websocket.disconnect":
+                            break
+                        
+                        if "text" in data:
+                            message = data["text"]
                             message_type = "text"
-                        except (RuntimeError, ValueError):
-                            message_bytes = await websocket.receive_bytes()
+                            ws_data["messages"].append({
+                                "direction": "client->server",
+                                "timestamp": datetime.now().isoformat(),
+                                "content": message,
+                                "type": message_type
+                            })
+                            await upstream_ws.send(message)
+                        elif "bytes" in data:
+                            message_bytes = data["bytes"]
                             message = message_bytes.decode("utf-8", errors="replace")
                             message_type = "binary"
-                        
-                        ws_data["messages"].append({
-                            "direction": "client->server",
-                            "timestamp": datetime.now().isoformat(),
-                            "content": message,
-                            "type": message_type
-                        })
-                        
-                        if message_type == "text":
-                            await upstream_ws.send(message)
-                        else:
+                            ws_data["messages"].append({
+                                "direction": "client->server",
+                                "timestamp": datetime.now().isoformat(),
+                                "content": message,
+                                "type": message_type
+                            })
                             await upstream_ws.send(message_bytes)
                 except WebSocketDisconnect:
                     pass
@@ -480,7 +487,6 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                     print(f"Error forwarding from upstream: {e}")
             
             # Run both forwarding tasks concurrently
-            import asyncio
             try:
                 await asyncio.gather(
                     forward_to_upstream(),
@@ -546,15 +552,68 @@ async def catch_all(request: Request, path: str):
     if request.query_params:
         target_url += f"?{request.query_params}"
     
+    # Check if this is likely a streaming request (OpenAI chat completions with stream: true)
+    is_streaming_request = False
+    if body:
+        try:
+            body_json = json.loads(body.decode("utf-8"))
+            if body_json.get("stream", False):
+                is_streaming_request = True
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    
     try:
-        async with httpx.AsyncClient() as client:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        
+        if is_streaming_request:
+            # Handle streaming response (SSE)
+            async def stream_response():
+                try:
+                    async with client.stream(
+                        method=request.method,
+                        url=target_url,
+                        headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
+                        content=body if body else None,
+                    ) as response:
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+                finally:
+                    await client.aclose()
+            
+            # Make initial request to get headers and status code
+            async with client.stream(
+                method=request.method,
+                url=target_url,
+                headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
+                content=body if body else None,
+            ) as initial_response:
+                response_headers = dict(initial_response.headers)
+                # Remove headers that might cause issues with streaming
+                response_headers.pop("content-length", None)
+                response_headers.pop("transfer-encoding", None)
+                
+                async def generate():
+                    try:
+                        async for chunk in initial_response.aiter_bytes():
+                            yield chunk
+                    finally:
+                        await client.aclose()
+                
+                return StreamingResponse(
+                    generate(),
+                    status_code=initial_response.status_code,
+                    headers=response_headers,
+                    media_type=response_headers.get("content-type", "text/event-stream")
+                )
+        else:
+            # Handle non-streaming response
             response = await client.request(
                 method=request.method,
                 url=target_url,
                 headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
                 content=body if body else None,
-                timeout=30.0
             )
+            await client.aclose()
             
             return Response(
                 content=response.content,
