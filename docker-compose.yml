@@ -2,9 +2,9 @@ version: '3.8'
 
 services:
   mitm-api:
-    build: .
+    image: ghcr.io/mkmenta/mitm-api:latest
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     environment:
       - PYTHONUNBUFFERED=1
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
