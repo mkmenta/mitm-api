@@ -552,74 +552,47 @@ async def catch_all(request: Request, path: str):
     if request.query_params:
         target_url += f"?{request.query_params}"
     
-    # Check if this is likely a streaming request (OpenAI chat completions with stream: true)
-    is_streaming_request = False
-    if body:
-        try:
-            body_json = json.loads(body.decode("utf-8"))
-            if body_json.get("stream", False):
-                is_streaming_request = True
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-    
     try:
         client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
         
-        if is_streaming_request:
-            # Handle streaming response (SSE)
-            async def stream_response():
-                try:
-                    async with client.stream(
-                        method=request.method,
-                        url=target_url,
-                        headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
-                        content=body if body else None,
-                    ) as response:
-                        async for chunk in response.aiter_bytes():
-                            yield chunk
-                finally:
-                    await client.aclose()
-            
-            # Make initial request to get headers and status code
-            async with client.stream(
-                method=request.method,
-                url=target_url,
-                headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
-                content=body if body else None,
-            ) as initial_response:
-                response_headers = dict(initial_response.headers)
-                # Remove headers that might cause issues with streaming
-                response_headers.pop("content-length", None)
-                response_headers.pop("transfer-encoding", None)
-                
-                async def generate():
-                    try:
-                        async for chunk in initial_response.aiter_bytes():
-                            yield chunk
-                    finally:
-                        await client.aclose()
-                
-                return StreamingResponse(
-                    generate(),
-                    status_code=initial_response.status_code,
-                    headers=response_headers,
-                    media_type=response_headers.get("content-type", "text/event-stream")
-                )
-        else:
-            # Handle non-streaming response
-            response = await client.request(
-                method=request.method,
-                url=target_url,
-                headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
-                content=body if body else None,
-            )
-            await client.aclose()
-            
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers=dict(response.headers)
-            )
+        # Open stream connection to get response metadata
+        stream_ctx = client.stream(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
+            content=body if body else None,
+        )
+        
+        response = await stream_ctx.__aenter__()
+        
+        # Get response headers and status (available immediately after connection)
+        response_headers = dict(response.headers)
+        # Remove headers that might cause issues with streaming
+        response_headers.pop("content-length", None)
+        response_headers.pop("transfer-encoding", None)
+        
+        # Get content type from upstream response
+        content_type = response_headers.get("content-type", "application/octet-stream")
+        status_code = response.status_code
+        
+        # Create generator that yields chunks from the already-open stream
+        async def generate():
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            finally:
+                # Clean up: exit stream context and close client
+                await stream_ctx.__aexit__(None, None, None)
+                await client.aclose()
+        
+        # Return streaming response with proper headers and status code from upstream
+        # This works for both streaming (SSE, chunked) and non-streaming responses
+        return StreamingResponse(
+            generate(),
+            status_code=status_code,
+            headers=response_headers,
+            media_type=content_type
+        )
     except Exception as e:
         return JSONResponse(
             {"error": f"Failed to forward request: {str(e)}"},
