@@ -22,7 +22,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: test
 
     steps:
       - name: Checkout repository
