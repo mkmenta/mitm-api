@@ -109,8 +109,6 @@ async def _extract_stream_keys(response: httpx.Response, *, max_events: int = 50
 
 @pytest.fixture(autouse=True)
 def configure_proxy_target(monkeypatch):
-    if not OPENAI_API_KEY:
-        pytest.skip("OPENAI_API_KEY not set; skipping OpenAI integration tests")
     monkeypatch.setattr(main, "redirect_endpoint", OPENAI_BASE_URL, raising=False)
     main.requests_history.clear()
     yield
