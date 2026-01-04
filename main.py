@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import FastAPI, Request, Form, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.templating import Jinja2Templates
 import httpx
 import json
 from typing import Optional
@@ -9,170 +9,55 @@ import os
 import asyncio
 import websockets
 from urllib.parse import urlparse
-import gzip
-import brotli
-import zlib
-
-# Get credentials from environment
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-
-# HTTP Basic Authentication
-security = HTTPBasic()
+from utils import decompress_body, verify_credentials
 
 app = FastAPI()
+
+# Jinja2 templates
+templates = Jinja2Templates(directory="templates")
 
 # In-memory storage for debugging
 requests_history = []
 redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
 
-def decompress_body(body: bytes, encoding: str) -> bytes:
-    """Decompress response body based on content-encoding."""
-    if not body:
-        return body
-    
-    try:
-        if encoding == "gzip":
-            return gzip.decompress(body)
-        elif encoding == "br":
-            return brotli.decompress(body)
-        elif encoding == "deflate":
-            return zlib.decompress(body)
-        else:
-            return body
-    except Exception as e:
-        print(f"Error decompressing body with {encoding}: {e}")
-        return body
-
-
-def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify HTTP Basic Auth credentials against environment variables."""
-    if not ADMIN_USERNAME or not ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Authentication not configured. Please set ADMIN_USERNAME and ADMIN_PASSWORD as environment variables",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    
-    if credentials.username != ADMIN_USERNAME or credentials.password != ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    
-    return credentials.username
-
-
 @app.get("/___configure", response_class=HTMLResponse)
-async def configure(username: str = Depends(verify_credentials)):
+async def configure(request: Request, username: str = Depends(verify_credentials)):
     """Show HTML form to configure the redirect endpoint."""
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>MITM Debugger - Configure</title>
-        <style>
-            body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-            input[type="text"] { width: 100%; padding: 8px; margin: 10px 0; }
-            button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; }
-            button:hover { background: #0056b3; }
-            .status { margin-top: 20px; padding: 10px; background: #f0f0f0; border-radius: 4px; }
-        </style>
-    </head>
-    <body>
-        <h1>MITM Debugger Configuration</h1>
-        <form method="post" action="/___configure">
-            <label for="endpoint">Redirect Endpoint URL:</label>
-            <input type="text" id="endpoint" name="endpoint" placeholder="https://example.com/api" value="">
-            <button type="submit">Save Configuration</button>
-        </form>
-        <div class="status">
-            <strong>Current endpoint:</strong> <span id="current">{current}</span>
-        </div>
-        <div style="margin-top: 20px;">
-            <a href="/___view_last/1">View Last Request</a>
-        </div>
-    </body>
-    </html>
-    """
-    current = redirect_endpoint or "Not configured"
-    return html_content.replace("{current}", current)
+    current_endpoint = redirect_endpoint or "Not configured"
+    return templates.TemplateResponse("configure.html", {
+        "request": request,
+        "current_endpoint": current_endpoint
+    })
 
 
 @app.post("/___configure")
-async def configure_post(endpoint: str = Form(...), username: str = Depends(verify_credentials)):
+async def configure_post(request: Request, endpoint: str = Form(...), username: str = Depends(verify_credentials)):
     """Save the redirect endpoint configuration."""
     global redirect_endpoint
     redirect_endpoint = endpoint.strip()
-    return HTMLResponse(
-        f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>MITM Debugger - Configure</title>
-            <meta http-equiv="refresh" content="2;url=/___configure">
-            <style>
-                body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
-                .success {{ padding: 15px; background: #d4edda; color: #155724; border-radius: 4px; }}
-            </style>
-        </head>
-        <body>
-            <div class="success">
-                <strong>Configuration saved!</strong> Redirecting to {redirect_endpoint}
-            </div>
-            <p><a href="/___configure">Back to configuration</a></p>
-        </body>
-        </html>
-        """
-    )
+    return templates.TemplateResponse("configure_success.html", {
+        "request": request,
+        "redirect_endpoint": redirect_endpoint
+    }, headers={"Refresh": "2;url=/___configure"})
 
 
 @app.get("/___view_last/{x}")
-async def view_last(x: int, username: str = Depends(verify_credentials)):
+async def view_last(request: Request, x: int, username: str = Depends(verify_credentials)):
     """View the last request at index x."""
     if not requests_history:
-        return HTMLResponse(
-            """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>MITM Debugger - No Requests</title>
-                <style>
-                    body { font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; }
-                    .error { padding: 15px; background: #f8d7da; color: #721c24; border-radius: 4px; }
-                </style>
-            </head>
-            <body>
-                <div class="error">No requests recorded yet</div>
-                <p><a href="/___configure">Back to configuration</a></p>
-            </body>
-            </html>
-            """,
-            status_code=404
-        )
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_title": "No Requests",
+            "error_message": "No requests recorded yet"
+        }, status_code=404)
     
     if x < 1 or x > len(requests_history):
-        return HTMLResponse(
-            f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>MITM Debugger - Error</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; }}
-                    .error {{ padding: 15px; background: #f8d7da; color: #721c24; border-radius: 4px; }}
-                </style>
-            </head>
-            <body>
-                <div class="error">Index {x} out of range. Available indices: 1-{len(requests_history)}</div>
-                <p><a href="/___configure">Back to configuration</a></p>
-            </body>
-            </html>
-            """,
-            status_code=404
-        )
+        return templates.TemplateResponse("error.html", {
+            "request": request,
+            "error_title": "Error",
+            "error_message": f"Index {x} out of range. Available indices: 1-{len(requests_history)}"
+        }, status_code=404)
     
     # Convert 1-based index to 0-based for array access
     index = x - 1
@@ -197,104 +82,17 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
         messages = request_data.get("messages", [])
         error = request_data.get("error")
         
-        # Format WebSocket messages
-        messages_html = ""
-        if messages:
-            for msg in messages:
-                direction = msg.get("direction", "unknown")
-                msg_timestamp = msg.get("timestamp", "N/A")
-                content = msg.get("content", "")
-                msg_type = msg.get("type", "text")
-                direction_color = "#007bff" if "client->server" in direction else "#28a745"
-                type_badge_color = "#6c757d" if msg_type == "text" else "#ff9800"
-                messages_html += f"""
-                <div style="margin: 10px 0; padding: 10px; border-left: 4px solid {direction_color}; background: #f8f9fa;">
-                    <div style="font-weight: bold; color: {direction_color}; margin-bottom: 5px;">
-                        {direction} 
-                        <span style="font-size: 0.85em; color: #6c757d;">({msg_timestamp})</span>
-                        <span style="font-size: 0.85em; background: {type_badge_color}; color: white; padding: 2px 6px; border-radius: 3px; margin-left: 5px;">{msg_type}</span>
-                    </div>
-                    <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">{content}</pre>
-                </div>
-                """
-        else:
-            messages_html = "<em>No messages exchanged</em>"
-        
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>MITM Debugger - WebSocket #{x}</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; }}
-                h1 {{ color: #333; }}
-                .metadata-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                .metadata-table th {{ background: #9c27b0; color: white; padding: 12px; text-align: left; }}
-                .metadata-table td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
-                .metadata-table tr:last-child td {{ border-bottom: none; }}
-                .metadata-table tr:nth-child(even) {{ background: #f8f9fa; }}
-                .messages-section {{ margin-top: 30px; }}
-                .messages-header {{ background: #9c27b0; color: white; padding: 10px; border-radius: 4px 4px 0 0; }}
-                .messages-content {{ background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 4px 4px; }}
-                .navigation {{ margin: 20px 0; }}
-                .navigation a {{ margin-right: 15px; padding: 8px 15px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }}
-                .navigation a:hover {{ background: #0056b3; }}
-                .info-badge {{ display: inline-block; padding: 4px 8px; background: #17a2b8; color: white; border-radius: 3px; font-size: 0.85em; margin-left: 10px; }}
-                .error {{ padding: 15px; background: #f8d7da; color: #721c24; border-radius: 4px; margin: 20px 0; }}
-            </style>
-        </head>
-        <body>
-            <h1>WebSocket Connection <span class="info-badge">#{x} of {len(requests_history)}</span></h1>
-            
-            <div class="navigation">
-                {' | '.join(nav_links)}
-            </div>
-            
-            <table class="metadata-table">
-                <tr>
-                    <th colspan="2">WebSocket Metadata</th>
-                </tr>
-                <tr>
-                    <td><strong>Timestamp</strong></td>
-                    <td>{timestamp}</td>
-                </tr>
-                <tr>
-                    <td><strong>Type</strong></td>
-                    <td><span style="background: #9c27b0; color: white; padding: 4px 8px; border-radius: 3px;">WebSocket</span></td>
-                </tr>
-                <tr>
-                    <td><strong>Path</strong></td>
-                    <td><code>{path}</code></td>
-                </tr>
-                <tr>
-                    <td><strong>Upstream URL</strong></td>
-                    <td><code>{ws_url}</code></td>
-                </tr>
-                <tr>
-                    <td><strong>Total Messages</strong></td>
-                    <td>{len(messages)}</td>
-                </tr>
-            </table>
-            
-            {f'<div class="error"><strong>Error:</strong> {error}</div>' if error else ''}
-            
-            <div class="messages-section">
-                <div class="messages-header">
-                    <strong>WebSocket Messages</strong>
-                </div>
-                <div class="messages-content">
-                    {messages_html}
-                </div>
-            </div>
-            
-            <div class="navigation" style="margin-top: 30px;">
-                {' | '.join(nav_links)}
-            </div>
-        </body>
-        </html>
-        """
-        
-        return HTMLResponse(html_content)
+        return templates.TemplateResponse("view_websocket.html", {
+            "request": request,
+            "index": x,
+            "total_count": len(requests_history),
+            "nav_links": " | ".join(nav_links),
+            "timestamp": timestamp,
+            "path": path,
+            "ws_url": ws_url,
+            "messages": messages,
+            "error": error
+        })
     
     # Extract metadata for HTTP requests
     timestamp = request_data.get("timestamp", "N/A")
@@ -311,12 +109,6 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
     # Format query params
     query_params_str = "&".join([f"{k}={v}" for k, v in query_params.items()]) if query_params else "None"
     
-    # Format headers as HTML table rows
-    headers_rows = "".join([
-        f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>"
-        for k, v in headers.items()
-    ]) if headers else "<tr><td colspan='2'>No headers</td></tr>"
-    
     # Format body content
     if body_json:
         body_content = f"<pre>{json.dumps(body_json, indent=2)}</pre>"
@@ -328,19 +120,16 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
         body_content = "<em>No body content</em>"
         body_type = "None"
     
-    # Format response data (if available)
-    response_section = ""
+    # Prepare response data for template
+    response_template_data = None
+    resp_body_content = None
+    resp_body_type = "None"
+    status_color = "#6c757d"
+    
     if response_data:
         resp_status = response_data.get("status_code", "N/A")
-        resp_headers = response_data.get("headers", {})
         resp_body = response_data.get("body", "")
         resp_body_json = response_data.get("body_json")
-        
-        # Format response headers
-        resp_headers_rows = "".join([
-            f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>"
-            for k, v in resp_headers.items()
-        ]) if resp_headers else "<tr><td colspan='2'>No headers</td></tr>"
         
         # Format response body
         if resp_body_json:
@@ -363,128 +152,25 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
         else:
             status_color = "#dc3545"
         
-        response_section = f"""
-        <h2 style="margin-top: 40px;">Response</h2>
-        <table class="metadata-table">
-            <tr>
-                <th colspan="2">Response Metadata</th>
-            </tr>
-            <tr>
-                <td><strong>Status Code</strong></td>
-                <td><span style="background: {status_color}; color: white; padding: 4px 12px; border-radius: 3px; font-weight: bold;">{resp_status}</span></td>
-            </tr>
-        </table>
-        
-        <h3>Response Headers</h3>
-        <table class="headers-table">
-            <tr>
-                <th>Header Name</th>
-                <th>Value</th>
-            </tr>
-            {resp_headers_rows}
-        </table>
-        
-        <div class="body-section">
-            <div class="body-header" style="background: #17a2b8;">
-                <strong>Response Body</strong> <span style="font-size: 0.9em; opacity: 0.9;">({resp_body_type})</span>
-            </div>
-            <div class="body-content">
-                {resp_body_content}
-            </div>
-        </div>
-        """
-    else:
-        response_section = """
-        <div style="margin-top: 40px; padding: 15px; background: #fff3cd; color: #856404; border-radius: 4px;">
-            <strong>Note:</strong> Response not yet captured. This may be because the request is still streaming, 
-            or the response capture feature was not yet implemented when this request was made.
-        </div>
-        """
+        response_template_data = response_data
     
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>MITM Debugger - Request #{x}</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; }}
-            h1 {{ color: #333; }}
-            .metadata-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            .metadata-table th {{ background: #007bff; color: white; padding: 12px; text-align: left; }}
-            .metadata-table td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
-            .metadata-table tr:last-child td {{ border-bottom: none; }}
-            .metadata-table tr:nth-child(even) {{ background: #f8f9fa; }}
-            .headers-table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
-            .headers-table th {{ background: #6c757d; color: white; padding: 10px; text-align: left; }}
-            .headers-table td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
-            .headers-table tr:nth-child(even) {{ background: #f8f9fa; }}
-            .body-section {{ margin-top: 30px; }}
-            .body-header {{ background: #28a745; color: white; padding: 10px; border-radius: 4px 4px 0 0; }}
-            .body-content {{ background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 4px 4px; }}
-            .body-content pre {{ margin: 0; white-space: pre-wrap; word-wrap: break-word; }}
-            .navigation {{ margin: 20px 0; }}
-            .navigation a {{ margin-right: 15px; padding: 8px 15px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }}
-            .navigation a:hover {{ background: #0056b3; }}
-            .info-badge {{ display: inline-block; padding: 4px 8px; background: #17a2b8; color: white; border-radius: 3px; font-size: 0.85em; margin-left: 10px; }}
-        </style>
-    </head>
-    <body>
-        <h1>Request Details <span class="info-badge">#{x} of {len(requests_history)}</span></h1>
-        
-        <div class="navigation">
-            {' | '.join(nav_links)}
-        </div>
-        
-        <table class="metadata-table">
-            <tr>
-                <th colspan="2">Request Metadata</th>
-            </tr>
-            <tr>
-                <td><strong>Timestamp</strong></td>
-                <td>{timestamp}</td>
-            </tr>
-            <tr>
-                <td><strong>Method</strong></td>
-                <td><span style="background: #007bff; color: white; padding: 4px 8px; border-radius: 3px;">{method}</span></td>
-            </tr>
-            <tr>
-                <td><strong>Path</strong></td>
-                <td><code>{path}</code></td>
-            </tr>
-            <tr>
-                <td><strong>Query Parameters</strong></td>
-                <td><code>{query_params_str}</code></td>
-            </tr>
-        </table>
-        
-        <h2>Headers</h2>
-        <table class="headers-table">
-            <tr>
-                <th>Header Name</th>
-                <th>Value</th>
-            </tr>
-            {headers_rows}
-        </table>
-        
-        <div class="body-section">
-            <div class="body-header">
-                <strong>Request Body</strong> <span style="font-size: 0.9em; opacity: 0.9;">({body_type})</span>
-            </div>
-            <div class="body-content">
-                {body_content}
-            </div>
-        </div>
-        
-        {response_section}
-        
-        <div class="navigation" style="margin-top: 30px;">
-            {' | '.join(nav_links)}
-        </div>
-    </body>
-    </html>
-    """
-    
-    return HTMLResponse(html_content)
+    return templates.TemplateResponse("view_request.html", {
+        "request": request,
+        "index": x,
+        "total_count": len(requests_history),
+        "nav_links": " | ".join(nav_links),
+        "timestamp": timestamp,
+        "method": method,
+        "path": path,
+        "query_params_str": query_params_str,
+        "headers": headers,
+        "body_content": body_content,
+        "body_type": body_type,
+        "response_data": response_template_data,
+        "resp_body_content": resp_body_content,
+        "resp_body_type": resp_body_type,
+        "status_color": status_color
+    })
 
 
 @app.websocket("/{path:path}")
