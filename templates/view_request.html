@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}MITM Debugger - Request #{{ index }}{% endblock %}
+
+{% block content %}
+<h1>Request Details <span class="info-badge">#{{ index }} of {{ total_count }}</span></h1>
+
+<div class="navigation">
+    {{ nav_links|safe }}
+</div>
+
+<table class="metadata-table">
+    <tr>
+        <th colspan="2">Request Metadata</th>
+    </tr>
+    <tr>
+        <td><strong>Timestamp</strong></td>
+        <td>{{ timestamp }}</td>
+    </tr>
+    <tr>
+        <td><strong>Method</strong></td>
+        <td><span style="background: #007bff; color: white; padding: 4px 8px; border-radius: 3px;">{{ method }}</span></td>
+    </tr>
+    <tr>
+        <td><strong>Path</strong></td>
+        <td><code>{{ path }}</code></td>
+    </tr>
+    <tr>
+        <td><strong>Query Parameters</strong></td>
+        <td><code>{{ query_params_str }}</code></td>
+    </tr>
+</table>
+
+<h2>Headers</h2>
+<table class="headers-table">
+    <tr>
+        <th>Header Name</th>
+        <th>Value</th>
+    </tr>
+    {% if headers %}
+        {% for key, value in headers.items() %}
+        <tr>
+            <td><strong>{{ key }}</strong></td>
+            <td>{{ value }}</td>
+        </tr>
+        {% endfor %}
+    {% else %}
+        <tr><td colspan="2">No headers</td></tr>
+    {% endif %}
+</table>
+
+<div class="body-section">
+    <div class="body-header">
+        <strong>Request Body</strong> <span style="font-size: 0.9em; opacity: 0.9;">({{ body_type }})</span>
+    </div>
+    <div class="body-content">
+        {{ body_content|safe }}
+    </div>
+</div>
+
+{% if response_data %}
+<h2 style="margin-top: 40px;">Response</h2>
+<table class="metadata-table">
+    <tr>
+        <th colspan="2">Response Metadata</th>
+    </tr>
+    <tr>
+        <td><strong>Status Code</strong></td>
+        <td><span style="background: {{ status_color }}; color: white; padding: 4px 12px; border-radius: 3px; font-weight: bold;">{{ response_data.status_code }}</span></td>
+    </tr>
+</table>
+
+<h3>Response Headers</h3>
+<table class="headers-table">
+    <tr>
+        <th>Header Name</th>
+        <th>Value</th>
+    </tr>
+    {% if response_data.headers %}
+        {% for key, value in response_data.headers.items() %}
+        <tr>
+            <td><strong>{{ key }}</strong></td>
+            <td>{{ value }}</td>
+        </tr>
+        {% endfor %}
+    {% else %}
+        <tr><td colspan="2">No headers</td></tr>
+    {% endif %}
+</table>
+
+<div class="body-section">
+    <div class="body-header" style="background: #17a2b8;">
+        <strong>Response Body</strong> <span style="font-size: 0.9em; opacity: 0.9;">({{ resp_body_type }})</span>
+    </div>
+    <div class="body-content">
+        {{ resp_body_content|safe }}
+    </div>
+</div>
+{% else %}
+<div class="warning" style="margin-top: 40px;">
+    <strong>Note:</strong> Response not yet captured. This may be because the request is still streaming, 
+    or the response capture feature was not yet implemented when this request was made.
+</div>
+{% endif %}
+
+<div class="navigation" style="margin-top: 30px;">
+    {{ nav_links|safe }}
+</div>
+{% endblock %}
+

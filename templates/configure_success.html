@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}MITM Debugger - Configure{% endblock %}
+
+{% block extra_styles %}
+<style>
+    body { max-width: 600px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="success">
+    <strong>Configuration saved!</strong> Redirecting to {{ redirect_endpoint }}
+</div>
+<p><a href="/___configure">Back to configuration</a></p>
+{% endblock %}
+

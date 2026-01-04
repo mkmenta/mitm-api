@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}MITM Debugger - {{ error_title }}{% endblock %}
+
+{% block content %}
+<div class="error">{{ error_message }}</div>
+<p><a href="/___configure">Back to configuration</a></p>
+{% endblock %}
+

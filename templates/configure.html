@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}MITM Debugger - Configure{% endblock %}
+
+{% block extra_styles %}
+<style>
+    body { max-width: 600px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>MITM Debugger Configuration</h1>
+<form method="post" action="/___configure">
+    <label for="endpoint">Redirect Endpoint URL:</label>
+    <input type="text" id="endpoint" name="endpoint" placeholder="https://example.com/api" value="">
+    <button type="submit">Save Configuration</button>
+</form>
+<div class="status">
+    <strong>Current endpoint:</strong> <span id="current">{{ current_endpoint }}</span>
+</div>
+<div style="margin-top: 20px;">
+    <a href="/___view_last/1">View Last Request</a>
+</div>
+{% endblock %}
+

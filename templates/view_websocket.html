@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}MITM Debugger - WebSocket #{{ index }}{% endblock %}
+
+{% block extra_styles %}
+<style>
+    .metadata-table th { background: #9c27b0; }
+    .messages-section { margin-top: 30px; }
+    .messages-header { background: #9c27b0; color: white; padding: 10px; border-radius: 4px 4px 0 0; }
+    .messages-content { background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 4px 4px; }
+    .message-item { margin: 10px 0; padding: 10px; border-left: 4px solid #007bff; background: #f8f9fa; }
+    .message-item.server { border-left-color: #28a745; }
+    .message-direction { font-weight: bold; margin-bottom: 5px; }
+    .message-timestamp { font-size: 0.85em; color: #6c757d; }
+    .message-type-badge { font-size: 0.85em; background: #6c757d; color: white; padding: 2px 6px; border-radius: 3px; margin-left: 5px; }
+    .message-type-badge.binary { background: #ff9800; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>WebSocket Connection <span class="info-badge">#{{ index }} of {{ total_count }}</span></h1>
+
+<div class="navigation">
+    {{ nav_links|safe }}
+</div>
+
+<table class="metadata-table">
+    <tr>
+        <th colspan="2">WebSocket Metadata</th>
+    </tr>
+    <tr>
+        <td><strong>Timestamp</strong></td>
+        <td>{{ timestamp }}</td>
+    </tr>
+    <tr>
+        <td><strong>Type</strong></td>
+        <td><span style="background: #9c27b0; color: white; padding: 4px 8px; border-radius: 3px;">WebSocket</span></td>
+    </tr>
+    <tr>
+        <td><strong>Path</strong></td>
+        <td><code>{{ path }}</code></td>
+    </tr>
+    <tr>
+        <td><strong>Upstream URL</strong></td>
+        <td><code>{{ ws_url }}</code></td>
+    </tr>
+    <tr>
+        <td><strong>Total Messages</strong></td>
+        <td>{{ messages|length }}</td>
+    </tr>
+</table>
+
+{% if error %}
+<div class="error"><strong>Error:</strong> {{ error }}</div>
+{% endif %}
+
+<div class="messages-section">
+    <div class="messages-header">
+        <strong>WebSocket Messages</strong>
+    </div>
+    <div class="messages-content">
+        {% if messages %}
+            {% for msg in messages %}
+            <div class="message-item {% if 'server->client' in msg.direction %}server{% endif %}">
+                <div class="message-direction" style="color: {% if 'client->server' in msg.direction %}#007bff{% else %}#28a745{% endif %};">
+                    {{ msg.direction }}
+                    <span class="message-timestamp">({{ msg.timestamp }})</span>
+                    <span class="message-type-badge {% if msg.type == 'binary' %}binary{% endif %}">{{ msg.type }}</span>
+                </div>
+                <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">{{ msg.content }}</pre>
+            </div>
+            {% endfor %}
+        {% else %}
+            <em>No messages exchanged</em>
+        {% endif %}
+    </div>
+</div>
+
+<div class="navigation" style="margin-top: 30px;">
+    {{ nav_links|safe }}
+</div>
+{% endblock %}
+
