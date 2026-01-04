@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   mitm-api:
     image: ghcr.io/mkmenta/mitm-api:latest
+    pull_policy: always
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
