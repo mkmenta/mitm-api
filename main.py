@@ -21,7 +21,7 @@ app = FastAPI()
 
 # In-memory storage for debugging
 requests_history = []
-redirect_endpoint: Optional[str] = None
+redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
