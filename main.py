@@ -1,5 +1,4 @@
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import FastAPI, Request, Form, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 import httpx
@@ -10,16 +9,7 @@ import os
 import asyncio
 import websockets
 from urllib.parse import urlparse
-import gzip
-import brotli
-import zlib
-
-# Get credentials from environment
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-
-# HTTP Basic Authentication
-security = HTTPBasic()
+from utils import decompress_body, verify_credentials
 
 app = FastAPI()
 
@@ -29,44 +19,6 @@ templates = Jinja2Templates(directory="templates")
 # In-memory storage for debugging
 requests_history = []
 redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
-
-
-def decompress_body(body: bytes, encoding: str) -> bytes:
-    """Decompress response body based on content-encoding."""
-    if not body:
-        return body
-    
-    try:
-        if encoding == "gzip":
-            return gzip.decompress(body)
-        elif encoding == "br":
-            return brotli.decompress(body)
-        elif encoding == "deflate":
-            return zlib.decompress(body)
-        else:
-            return body
-    except Exception as e:
-        print(f"Error decompressing body with {encoding}: {e}")
-        return body
-
-
-def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify HTTP Basic Auth credentials against environment variables."""
-    if not ADMIN_USERNAME or not ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Authentication not configured. Please set ADMIN_USERNAME and ADMIN_PASSWORD as environment variables",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    
-    if credentials.username != ADMIN_USERNAME or credentials.password != ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    
-    return credentials.username
 
 
 @app.get("/___configure", response_class=HTMLResponse)
