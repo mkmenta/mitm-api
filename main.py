@@ -1,11 +1,14 @@
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status
+from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 import httpx
 import json
 from typing import Optional
 from datetime import datetime
 import os
+import asyncio
+import websockets
+from urllib.parse import urlparse
 
 # Get credentials from environment
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
@@ -18,7 +21,7 @@ app = FastAPI()
 
 # In-memory storage for debugging
 requests_history = []
-redirect_endpoint: Optional[str] = None
+redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
@@ -153,7 +156,125 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
     index = x - 1
     request_data = requests_history[index].copy()
     
-    # Extract metadata
+    # Build navigation links (using 1-based indexing)
+    nav_links = []
+    if x > 1:
+        nav_links.append(f'<a href="/___view_last/{x-1}">← Previous</a>')
+    nav_links.append('<a href="/___configure">Configuration</a>')
+    if x < len(requests_history):
+        nav_links.append(f'<a href="/___view_last/{x+1}">Next →</a>')
+    
+    # Check if this is a WebSocket connection
+    is_websocket = request_data.get("type") == "websocket"
+    
+    if is_websocket:
+        # Handle WebSocket data
+        timestamp = request_data.get("timestamp", "N/A")
+        path = request_data.get("path", "N/A")
+        ws_url = request_data.get("url", "N/A")
+        messages = request_data.get("messages", [])
+        error = request_data.get("error")
+        
+        # Format WebSocket messages
+        messages_html = ""
+        if messages:
+            for msg in messages:
+                direction = msg.get("direction", "unknown")
+                msg_timestamp = msg.get("timestamp", "N/A")
+                content = msg.get("content", "")
+                msg_type = msg.get("type", "text")
+                direction_color = "#007bff" if "client->server" in direction else "#28a745"
+                type_badge_color = "#6c757d" if msg_type == "text" else "#ff9800"
+                messages_html += f"""
+                <div style="margin: 10px 0; padding: 10px; border-left: 4px solid {direction_color}; background: #f8f9fa;">
+                    <div style="font-weight: bold; color: {direction_color}; margin-bottom: 5px;">
+                        {direction} 
+                        <span style="font-size: 0.85em; color: #6c757d;">({msg_timestamp})</span>
+                        <span style="font-size: 0.85em; background: {type_badge_color}; color: white; padding: 2px 6px; border-radius: 3px; margin-left: 5px;">{msg_type}</span>
+                    </div>
+                    <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">{content}</pre>
+                </div>
+                """
+        else:
+            messages_html = "<em>No messages exchanged</em>"
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>MITM Debugger - WebSocket #{x}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; }}
+                h1 {{ color: #333; }}
+                .metadata-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                .metadata-table th {{ background: #9c27b0; color: white; padding: 12px; text-align: left; }}
+                .metadata-table td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
+                .metadata-table tr:last-child td {{ border-bottom: none; }}
+                .metadata-table tr:nth-child(even) {{ background: #f8f9fa; }}
+                .messages-section {{ margin-top: 30px; }}
+                .messages-header {{ background: #9c27b0; color: white; padding: 10px; border-radius: 4px 4px 0 0; }}
+                .messages-content {{ background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 4px 4px; }}
+                .navigation {{ margin: 20px 0; }}
+                .navigation a {{ margin-right: 15px; padding: 8px 15px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }}
+                .navigation a:hover {{ background: #0056b3; }}
+                .info-badge {{ display: inline-block; padding: 4px 8px; background: #17a2b8; color: white; border-radius: 3px; font-size: 0.85em; margin-left: 10px; }}
+                .error {{ padding: 15px; background: #f8d7da; color: #721c24; border-radius: 4px; margin: 20px 0; }}
+            </style>
+        </head>
+        <body>
+            <h1>WebSocket Connection <span class="info-badge">#{x} of {len(requests_history)}</span></h1>
+            
+            <div class="navigation">
+                {' | '.join(nav_links)}
+            </div>
+            
+            <table class="metadata-table">
+                <tr>
+                    <th colspan="2">WebSocket Metadata</th>
+                </tr>
+                <tr>
+                    <td><strong>Timestamp</strong></td>
+                    <td>{timestamp}</td>
+                </tr>
+                <tr>
+                    <td><strong>Type</strong></td>
+                    <td><span style="background: #9c27b0; color: white; padding: 4px 8px; border-radius: 3px;">WebSocket</span></td>
+                </tr>
+                <tr>
+                    <td><strong>Path</strong></td>
+                    <td><code>{path}</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Upstream URL</strong></td>
+                    <td><code>{ws_url}</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Total Messages</strong></td>
+                    <td>{len(messages)}</td>
+                </tr>
+            </table>
+            
+            {f'<div class="error"><strong>Error:</strong> {error}</div>' if error else ''}
+            
+            <div class="messages-section">
+                <div class="messages-header">
+                    <strong>WebSocket Messages</strong>
+                </div>
+                <div class="messages-content">
+                    {messages_html}
+                </div>
+            </div>
+            
+            <div class="navigation" style="margin-top: 30px;">
+                {' | '.join(nav_links)}
+            </div>
+        </body>
+        </html>
+        """
+        
+        return HTMLResponse(html_content)
+    
+    # Extract metadata for HTTP requests
     timestamp = request_data.get("timestamp", "N/A")
     method = request_data.get("method", "N/A")
     path = request_data.get("path", "N/A")
@@ -181,14 +302,6 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
     else:
         body_content = "<em>No body content</em>"
         body_type = "None"
-    
-    # Build navigation links (using 1-based indexing)
-    nav_links = []
-    if x > 1:
-        nav_links.append(f'<a href="/___view_last/{x-1}">← Previous</a>')
-    nav_links.append('<a href="/___configure">Configuration</a>')
-    if x < len(requests_history):
-        nav_links.append(f'<a href="/___view_last/{x+1}">Next →</a>')
     
     html_content = f"""
     <!DOCTYPE html>
@@ -274,6 +387,127 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
     return HTMLResponse(html_content)
 
 
+@app.websocket("/{path:path}")
+async def websocket_endpoint(websocket: WebSocket, path: str):
+    """Handle WebSocket connections and forward them to the configured endpoint with streaming support."""
+    global redirect_endpoint
+    
+    if not redirect_endpoint:
+        await websocket.close(code=1008, reason="No redirect endpoint configured")
+        return
+    
+    # Accept the WebSocket connection
+    await websocket.accept()
+    
+    # Parse the redirect endpoint to get WebSocket URL
+    parsed = urlparse(redirect_endpoint)
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    ws_host = parsed.netloc
+    ws_path = f"{parsed.path.rstrip('/')}/{path}" if path else parsed.path.rstrip('/')
+    if parsed.query:
+        ws_path += f"?{parsed.query}"
+    
+    # Build WebSocket URL
+    ws_url = f"{ws_scheme}://{ws_host}{ws_path}"
+    
+    # Capture WebSocket connection details
+    ws_data = {
+        "timestamp": datetime.now().isoformat(),
+        "type": "websocket",
+        "path": f"/{path}" if path else "/",
+        "url": ws_url,
+        "messages": []
+    }
+    
+    try:
+        # Connect to upstream WebSocket server
+        async with websockets.connect(
+            ws_url,
+            extra_headers=dict(websocket.headers)
+        ) as upstream_ws:
+            
+            # Task to forward messages from client to upstream
+            async def forward_to_upstream():
+                try:
+                    while True:
+                        # Use low-level receive to handle both text and binary
+                        data = await websocket.receive()
+                        
+                        if data["type"] == "websocket.disconnect":
+                            break
+                        
+                        if "text" in data:
+                            message = data["text"]
+                            message_type = "text"
+                            ws_data["messages"].append({
+                                "direction": "client->server",
+                                "timestamp": datetime.now().isoformat(),
+                                "content": message,
+                                "type": message_type
+                            })
+                            await upstream_ws.send(message)
+                        elif "bytes" in data:
+                            message_bytes = data["bytes"]
+                            message = message_bytes.decode("utf-8", errors="replace")
+                            message_type = "binary"
+                            ws_data["messages"].append({
+                                "direction": "client->server",
+                                "timestamp": datetime.now().isoformat(),
+                                "content": message,
+                                "type": message_type
+                            })
+                            await upstream_ws.send(message_bytes)
+                except WebSocketDisconnect:
+                    pass
+                except Exception as e:
+                    print(f"Error forwarding to upstream: {e}")
+            
+            # Task to forward messages from upstream to client (streaming)
+            async def forward_from_upstream():
+                try:
+                    while True:
+                        message = await upstream_ws.recv()
+                        is_binary = isinstance(message, bytes)
+                        message_content = message if isinstance(message, str) else message.decode("utf-8", errors="replace")
+                        
+                        ws_data["messages"].append({
+                            "direction": "server->client",
+                            "timestamp": datetime.now().isoformat(),
+                            "content": message_content,
+                            "type": "binary" if is_binary else "text"
+                        })
+                        
+                        if is_binary:
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+                except websockets.exceptions.ConnectionClosed:
+                    pass
+                except Exception as e:
+                    print(f"Error forwarding from upstream: {e}")
+            
+            # Run both forwarding tasks concurrently
+            try:
+                await asyncio.gather(
+                    forward_to_upstream(),
+                    forward_from_upstream()
+                )
+            except Exception as e:
+                print(f"WebSocket error: {e}")
+    
+    except Exception as e:
+        ws_data["error"] = str(e)
+        await websocket.close(code=1011, reason=f"Upstream connection failed: {str(e)}")
+    
+    finally:
+        # Save WebSocket session to history
+        requests_history.append(ws_data)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def catch_all(request: Request, path: str):
     """Catch all requests, save them, and forward to configured endpoint."""
@@ -319,20 +553,46 @@ async def catch_all(request: Request, path: str):
         target_url += f"?{request.query_params}"
     
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.request(
-                method=request.method,
-                url=target_url,
-                headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
-                content=body if body else None,
-                timeout=30.0
-            )
-            
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers=dict(response.headers)
-            )
+        client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        
+        # Open stream connection to get response metadata
+        stream_ctx = client.stream(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in headers.items() if k.lower() not in ["host", "content-length"]},
+            content=body if body else None,
+        )
+        
+        response = await stream_ctx.__aenter__()
+        
+        # Get response headers and status (available immediately after connection)
+        response_headers = dict(response.headers)
+        # Remove headers that might cause issues with streaming
+        response_headers.pop("content-length", None)
+        response_headers.pop("transfer-encoding", None)
+        
+        # Get content type from upstream response
+        content_type = response_headers.get("content-type", "application/octet-stream")
+        status_code = response.status_code
+        
+        # Create generator that yields chunks from the already-open stream
+        async def generate():
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            finally:
+                # Clean up: exit stream context and close client
+                await stream_ctx.__aexit__(None, None, None)
+                await client.aclose()
+        
+        # Return streaming response with proper headers and status code from upstream
+        # This works for both streaming (SSE, chunked) and non-streaming responses
+        return StreamingResponse(
+            generate(),
+            status_code=status_code,
+            headers=response_headers,
+            media_type=content_type
+        )
     except Exception as e:
         return JSONResponse(
             {"error": f"Failed to forward request: {str(e)}"},
