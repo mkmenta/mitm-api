@@ -3,3 +3,4 @@ uvicorn[standard]==0.40.0
 httpx==0.28.1
 python-multipart==0.0.21
 websockets==14.1
+brotli==1.1.0

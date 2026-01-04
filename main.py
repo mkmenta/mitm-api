@@ -9,6 +9,9 @@ import os
 import asyncio
 import websockets
 from urllib.parse import urlparse
+import gzip
+import brotli
+import zlib
 
 # Get credentials from environment
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
@@ -22,6 +25,25 @@ app = FastAPI()
 # In-memory storage for debugging
 requests_history = []
 redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
+
+
+def decompress_body(body: bytes, encoding: str) -> bytes:
+    """Decompress response body based on content-encoding."""
+    if not body:
+        return body
+    
+    try:
+        if encoding == "gzip":
+            return gzip.decompress(body)
+        elif encoding == "br":
+            return brotli.decompress(body)
+        elif encoding == "deflate":
+            return zlib.decompress(body)
+        else:
+            return body
+    except Exception as e:
+        print(f"Error decompressing body with {encoding}: {e}")
+        return body
 
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
@@ -283,6 +305,9 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
     body = request_data.get("body", "")
     body_json = request_data.get("body_json")
     
+    # Extract response data (if available)
+    response_data = request_data.get("response")
+    
     # Format query params
     query_params_str = "&".join([f"{k}={v}" for k, v in query_params.items()]) if query_params else "None"
     
@@ -302,6 +327,79 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
     else:
         body_content = "<em>No body content</em>"
         body_type = "None"
+    
+    # Format response data (if available)
+    response_section = ""
+    if response_data:
+        resp_status = response_data.get("status_code", "N/A")
+        resp_headers = response_data.get("headers", {})
+        resp_body = response_data.get("body", "")
+        resp_body_json = response_data.get("body_json")
+        
+        # Format response headers
+        resp_headers_rows = "".join([
+            f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>"
+            for k, v in resp_headers.items()
+        ]) if resp_headers else "<tr><td colspan='2'>No headers</td></tr>"
+        
+        # Format response body
+        if resp_body_json:
+            resp_body_content = f"<pre>{json.dumps(resp_body_json, indent=2)}</pre>"
+            resp_body_type = "JSON"
+        elif resp_body:
+            resp_body_content = f"<pre>{resp_body}</pre>"
+            resp_body_type = "Plain Text"
+        else:
+            resp_body_content = "<em>No body content</em>"
+            resp_body_type = "None"
+        
+        # Determine status color
+        if resp_status < 300:
+            status_color = "#28a745"
+        elif resp_status < 400:
+            status_color = "#17a2b8"
+        elif resp_status < 500:
+            status_color = "#ffc107"
+        else:
+            status_color = "#dc3545"
+        
+        response_section = f"""
+        <h2 style="margin-top: 40px;">Response</h2>
+        <table class="metadata-table">
+            <tr>
+                <th colspan="2">Response Metadata</th>
+            </tr>
+            <tr>
+                <td><strong>Status Code</strong></td>
+                <td><span style="background: {status_color}; color: white; padding: 4px 12px; border-radius: 3px; font-weight: bold;">{resp_status}</span></td>
+            </tr>
+        </table>
+        
+        <h3>Response Headers</h3>
+        <table class="headers-table">
+            <tr>
+                <th>Header Name</th>
+                <th>Value</th>
+            </tr>
+            {resp_headers_rows}
+        </table>
+        
+        <div class="body-section">
+            <div class="body-header" style="background: #17a2b8;">
+                <strong>Response Body</strong> <span style="font-size: 0.9em; opacity: 0.9;">({resp_body_type})</span>
+            </div>
+            <div class="body-content">
+                {resp_body_content}
+            </div>
+        </div>
+        """
+    else:
+        response_section = """
+        <div style="margin-top: 40px; padding: 15px; background: #fff3cd; color: #856404; border-radius: 4px;">
+            <strong>Note:</strong> Response not yet captured. This may be because the request is still streaming, 
+            or the response capture feature was not yet implemented when this request was made.
+        </div>
+        """
     
     html_content = f"""
     <!DOCTYPE html>
@@ -376,6 +474,8 @@ async def view_last(x: int, username: str = Depends(verify_credentials)):
                 {body_content}
             </div>
         </div>
+        
+        {response_section}
         
         <div class="navigation" style="margin-top: 30px;">
             {' | '.join(nav_links)}
@@ -544,8 +644,9 @@ async def catch_all(request: Request, path: str):
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
     
-    # Save to history
+    # Save to history (response will be updated after streaming completes)
     requests_history.append(request_data)
+    request_data_index = len(requests_history) - 1
     
     # Forward request to configured endpoint
     target_url = f"{redirect_endpoint.rstrip('/')}/{path}" if path else redirect_endpoint.rstrip('/')
@@ -570,20 +671,68 @@ async def catch_all(request: Request, path: str):
         # Remove headers that might cause issues with streaming
         response_headers.pop("content-length", None)
         response_headers.pop("transfer-encoding", None)
+        response_headers.pop("content-encoding", None)  # Remove encoding since we're re-streaming
         
         # Get content type from upstream response
         content_type = response_headers.get("content-type", "application/octet-stream")
         status_code = response.status_code
         
+        # Check if content is encoded (compressed)
+        content_encoding = response.headers.get("content-encoding", "").lower()
+        needs_decompression = content_encoding in ["gzip", "br", "deflate"]
+        
         # Create generator that yields chunks from the already-open stream
+        # and accumulates them for later storage
         async def generate():
+            response_chunks = []
             try:
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+                if needs_decompression:
+                    # For compressed responses, we need to collect all chunks first,
+                    # decompress, then yield the complete decompressed body
+                    async for chunk in response.aiter_bytes():
+                        response_chunks.append(chunk)
+                    
+                    # Combine and decompress
+                    response_body = b"".join(response_chunks)
+                    response_body = decompress_body(response_body, content_encoding)
+                    
+                    # Yield the complete decompressed body
+                    yield response_body
+                else:
+                    # For non-compressed responses (like SSE streams), 
+                    # stream chunks through immediately
+                    async for chunk in response.aiter_bytes():
+                        response_chunks.append(chunk)
+                        yield chunk
+                
             finally:
-                # Clean up: exit stream context and close client
-                await stream_ctx.__aexit__(None, None, None)
-                await client.aclose()
+                # After streaming completes, save the response data
+                try:
+                    response_body_final = b"".join(response_chunks)
+                    
+                    # Decompress if needed (will only happen if needs_decompression was True)
+                    if needs_decompression:
+                        response_body_final = decompress_body(response_body_final, content_encoding)
+                    
+                    requests_history[request_data_index]["response"] = {
+                        "status_code": status_code,
+                        "headers": dict(response.headers),
+                        "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
+                    }
+                    
+                    # Try to parse response body as JSON if possible
+                    if response_body_final:
+                        try:
+                            requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            pass
+                except Exception as e:
+                    # Don't let response capture errors affect the streaming
+                    print(f"Error capturing response: {e}")
+                finally:
+                    # Clean up: exit stream context and close client
+                    await stream_ctx.__aexit__(None, None, None)
+                    await client.aclose()
         
         # Return streaming response with proper headers and status code from upstream
         # This works for both streaming (SSE, chunked) and non-streaming responses
