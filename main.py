@@ -25,8 +25,7 @@ redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 async def configure(request: Request, username: str = Depends(verify_credentials)):
     """Show HTML form to configure the redirect endpoint."""
     current_endpoint = redirect_endpoint or "Not configured"
-    return templates.TemplateResponse("configure.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "configure.html", {
         "current_endpoint": current_endpoint
     })
 
@@ -36,8 +35,7 @@ async def configure_post(request: Request, endpoint: str = Form(...), username: 
     """Save the redirect endpoint configuration."""
     global redirect_endpoint
     redirect_endpoint = endpoint.strip()
-    return templates.TemplateResponse("configure_success.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "configure_success.html", {
         "redirect_endpoint": redirect_endpoint
     }, headers={"Refresh": "2;url=/___configure"})
 
@@ -46,15 +44,13 @@ async def configure_post(request: Request, endpoint: str = Form(...), username: 
 async def view_last(request: Request, x: int, username: str = Depends(verify_credentials)):
     """View the last request at index x."""
     if not requests_history:
-        return templates.TemplateResponse("error.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "error.html", {
             "error_title": "No Requests",
             "error_message": "No requests recorded yet"
         }, status_code=404)
     
     if x < 1 or x > len(requests_history):
-        return templates.TemplateResponse("error.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "error.html", {
             "error_title": "Error",
             "error_message": f"Index {x} out of range. Available indices: 1-{len(requests_history)}"
         }, status_code=404)
@@ -82,8 +78,7 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         messages = request_data.get("messages", [])
         error = request_data.get("error")
         
-        return templates.TemplateResponse("view_websocket.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "view_websocket.html", {
             "index": x,
             "total_count": len(requests_history),
             "nav_links": " | ".join(nav_links),
@@ -154,8 +149,7 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         
         response_template_data = response_data
     
-    return templates.TemplateResponse("view_request.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "view_request.html", {
         "index": x,
         "total_count": len(requests_history),
         "nav_links": " | ".join(nav_links),
