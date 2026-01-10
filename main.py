@@ -11,7 +11,51 @@ import websockets
 from urllib.parse import urlparse
 from utils import decompress_body, verify_credentials
 
-app = FastAPI()
+import glob
+from contextlib import asynccontextmanager
+
+PERSISTENCE_DIR = "requests_data"
+
+def load_history():
+    """Load requests history from persistence directory."""
+    if not os.path.exists(PERSISTENCE_DIR):
+        os.makedirs(PERSISTENCE_DIR)
+        return
+    
+    files = glob.glob(os.path.join(PERSISTENCE_DIR, "*.json"))
+    # Sort by filename (assuming filenames are numerical indices)
+    # Actually, if we name them 0.json, 1.json, etc., simple sort might fail on 10 vs 2.
+    # We should extract the integer index.
+    files.sort(key=lambda f: int(os.path.basename(f).split('.')[0]))
+    
+    requests_history.clear()
+    for f_path in files:
+        try:
+            with open(f_path, "r") as f:
+                requests_history.append(json.load(f))
+        except Exception as e:
+            print(f"Error loading {f_path}: {e}")
+
+def save_request(index: int, data: dict):
+    """Save a request to the persistence directory."""
+    if not os.path.exists(PERSISTENCE_DIR):
+        os.makedirs(PERSISTENCE_DIR)
+    
+    file_path = os.path.join(PERSISTENCE_DIR, f"{index}.json")
+    try:
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving request {index}: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load history on startup
+    load_history()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
 
 # Jinja2 templates
 templates = Jinja2Templates(directory="templates")
@@ -282,6 +326,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
     finally:
         # Save WebSocket session to history
         requests_history.append(ws_data)
+        save_request(len(requests_history) - 1, ws_data)
         try:
             await websocket.close()
         except Exception:
@@ -327,6 +372,7 @@ async def catch_all(request: Request, path: str):
     # Save to history (response will be updated after streaming completes)
     requests_history.append(request_data)
     request_data_index = len(requests_history) - 1
+    save_request(request_data_index, request_data)
     
     # Forward request to configured endpoint
     target_url = f"{redirect_endpoint.rstrip('/')}/{path}" if path else redirect_endpoint.rstrip('/')
@@ -399,11 +445,13 @@ async def catch_all(request: Request, path: str):
                         "headers": dict(response.headers),
                         "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
                     }
+                    save_request(request_data_index, requests_history[request_data_index])
                     
                     # Try to parse response body as JSON if possible
                     if response_body_final:
                         try:
                             requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
+                            save_request(request_data_index, requests_history[request_data_index])
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             pass
                 except Exception as e:
