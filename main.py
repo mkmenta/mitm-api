@@ -9,7 +9,7 @@ import os
 import asyncio
 import websockets
 from urllib.parse import urlparse
-from utils import decompress_body, verify_credentials
+from utils import decompress_body, verify_credentials, redact_sensitive_data
 
 import glob
 from contextlib import asynccontextmanager
@@ -32,6 +32,9 @@ analyses: dict = {}  # id -> analysis metadata
 current_analysis_id: Optional[str] = None
 redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
+# In-memory storage for debugging
+requests_history = []
+
 # Lock for synchronizing access to global state
 state_lock = asyncio.Lock()
 
@@ -47,6 +50,7 @@ async def load_analyses_metadata():
             try:
                 with open(METADATA_FILE, "r") as f:
                     metadata = json.load(f)
+                    analyses.clear()
                     analyses.update(metadata.get("analyses", {}))
                     
                     # Load current_analysis_id if present
@@ -70,13 +74,14 @@ async def save_analyses_metadata():
         except Exception as e:
             logger.error(f"Error saving metadata: {e}", exc_info=True)
 
-async def create_analysis(title: str, endpoint: str) -> dict:
+async def create_analysis(title: str, endpoint: str, redact_sensitive: bool = False) -> dict:
     """Create a new analysis with unique ID."""
     analysis_id = str(uuid.uuid4())
     analysis = {
         "id": analysis_id,
         "title": title,
         "endpoint": endpoint,
+        "redact_sensitive": redact_sensitive,
         "created_at": datetime.now().isoformat()
     }
     
@@ -118,21 +123,14 @@ async def load_history():
             try:
                 with open(f_path, "r") as f:
                     data = json.load(f)
-                    # Ensure the data has an ID for our tracking
-                    if "id" not in data:
-                        # Try to get ID from filename if it's the new format, 
-                        # but we'll mostly rely on internal data
-                        pass
                     loaded_history.append(data)
             except Exception as e:
                 logger.error(f"Error loading {f_path}: {e}")
         
         # Sort by timestamp (most robust) or fallback to filename if timestamp missing
-        # This fixes the "Unsafe Sorting" issue
         def sort_key(item):
             ts = item.get("timestamp", "")
             if not ts:
-                # If no timestamp, try to use ID or a very old date
                 return item.get("id", "0000-00-00T00:00:00")
             return ts
 
@@ -170,13 +168,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-
 # Jinja2 templates
 templates = Jinja2Templates(directory="templates")
-
-# In-memory storage for debugging
-requests_history = []
-
 
 @app.get("/___configure", response_class=HTMLResponse)
 async def configure(request: Request, username: str = Depends(verify_credentials)):
@@ -197,7 +190,6 @@ async def configure(request: Request, username: str = Depends(verify_credentials
         "num_requests": num_requests
     })
 
-
 @app.post("/___configure")
 async def configure_post(
     request: Request, 
@@ -205,6 +197,7 @@ async def configure_post(
     action: str = Form(...),
     title: Optional[str] = Form(None),
     endpoint: Optional[str] = Form(None),
+    redact_sensitive: bool = Form(False),
     analysis_id: Optional[str] = Form(None)
 ):
     """Handle analysis creation and switching."""
@@ -218,7 +211,7 @@ async def configure_post(
                 "error_message": "Title and endpoint are required to create an analysis"
             }, status_code=400)
         
-        analysis = await create_analysis(title.strip(), endpoint.strip())
+        analysis = await create_analysis(title.strip(), endpoint.strip(), redact_sensitive)
         async with state_lock:
             current_analysis_id = analysis["id"]
             redirect_endpoint = analysis["endpoint"]
@@ -263,7 +256,6 @@ async def configure_post(
             "error_title": "Invalid Action",
             "error_message": f"Unknown action: {action}"
         }, status_code=400)
-
 
 @app.get("/___view_last/{x}")
 async def view_last(request: Request, x: int, username: str = Depends(verify_credentials)):
@@ -399,7 +391,6 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         "current_analysis": current_analysis
     })
 
-
 @app.websocket("/{path:path}")
 async def websocket_endpoint(websocket: WebSocket, path: str):
     """Handle WebSocket connections and forward them to the configured endpoint with streaming support."""
@@ -407,8 +398,6 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
         if not redirect_endpoint:
             await websocket.close(code=1008, reason="No redirect endpoint configured")
             return
-        
-        # Use a local variable to avoid race conditions if redirect_endpoint changes
         local_redirect_endpoint = redirect_endpoint
     
     # Accept the WebSocket connection
@@ -455,23 +444,21 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                         
                         if "text" in data:
                             message = data["text"]
-                            message_type = "text"
                             ws_data["messages"].append({
                                 "direction": "client->server",
                                 "timestamp": datetime.now().isoformat(),
                                 "content": message,
-                                "type": message_type
+                                "type": "text"
                             })
                             await upstream_ws.send(message)
                         elif "bytes" in data:
                             message_bytes = data["bytes"]
                             message = message_bytes.decode("utf-8", errors="replace")
-                            message_type = "binary"
                             ws_data["messages"].append({
                                 "direction": "client->server",
                                 "timestamp": datetime.now().isoformat(),
                                 "content": message,
-                                "type": message_type
+                                "type": "binary"
                             })
                             await upstream_ws.send(message_bytes)
                 except WebSocketDisconnect:
@@ -527,7 +514,6 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
         except Exception:
             pass
 
-
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def catch_all(request: Request, path: str):
     """Catch all requests, save them, and forward to configured endpoint."""
@@ -568,6 +554,10 @@ async def catch_all(request: Request, path: str):
     
     # Save to history (response will be updated after streaming completes)
     async with state_lock:
+        current_analysis = get_analysis(current_analysis_id) if current_analysis_id else None
+        if current_analysis and current_analysis.get("redact_sensitive"):
+            request_data["headers"] = redact_sensitive_data(request_data["headers"])
+        
         requests_history.append(request_data)
         request_data_index = len(requests_history) - 1
     
@@ -640,17 +630,28 @@ async def catch_all(request: Request, path: str):
                         response_body_final = decompress_body(response_body_final, content_encoding)
                     
                     async with state_lock:
-                        requests_history[request_data_index]["response"] = {
+                        current_analysis = get_analysis(current_analysis_id) if current_analysis_id else None
+                        should_redact = current_analysis and current_analysis.get("redact_sensitive")
+                        
+                        headers = dict(response.headers)
+                        if should_redact:
+                            headers = redact_sensitive_data(headers)
+
+                        resp_data = {
                             "status_code": status_code,
-                            "headers": dict(response.headers),
+                            "headers": headers,
                             "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
                         }
+                            
+                        requests_history[request_data_index]["response"] = resp_data
+                    
                     await save_request(requests_history[request_data_index]["id"], requests_history[request_data_index])
                     
                     if response_body_final:
                         try:
                             async with state_lock:
-                                requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
+                                body_json = json.loads(response_body_final.decode("utf-8"))
+                                requests_history[request_data_index]["response"]["body_json"] = body_json
                             await save_request(requests_history[request_data_index]["id"], requests_history[request_data_index])
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             pass
@@ -663,7 +664,6 @@ async def catch_all(request: Request, path: str):
                     await client.aclose()
         
         # Return streaming response with proper headers and status code from upstream
-        # This works for both streaming (SSE, chunked) and non-streaming responses
         return StreamingResponse(
             generate(),
             status_code=status_code,
@@ -675,4 +675,3 @@ async def catch_all(request: Request, path: str):
             {"error": f"Failed to forward request: {str(e)}"},
             status_code=502
         )
-
