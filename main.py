@@ -9,7 +9,7 @@ import os
 import asyncio
 import websockets
 from urllib.parse import urlparse
-from utils import decompress_body, verify_credentials
+from utils import decompress_body, verify_credentials, redact_sensitive_data
 
 import glob
 from contextlib import asynccontextmanager
@@ -70,13 +70,14 @@ async def save_analyses_metadata():
         except Exception as e:
             logger.error(f"Error saving metadata: {e}", exc_info=True)
 
-async def create_analysis(title: str, endpoint: str) -> dict:
+async def create_analysis(title: str, endpoint: str, redact_sensitive: bool = False) -> dict:
     """Create a new analysis with unique ID."""
     analysis_id = str(uuid.uuid4())
     analysis = {
         "id": analysis_id,
         "title": title,
         "endpoint": endpoint,
+        "redact_sensitive": redact_sensitive,
         "created_at": datetime.now().isoformat()
     }
     
@@ -205,6 +206,7 @@ async def configure_post(
     action: str = Form(...),
     title: Optional[str] = Form(None),
     endpoint: Optional[str] = Form(None),
+    redact_sensitive: bool = Form(False),
     analysis_id: Optional[str] = Form(None)
 ):
     """Handle analysis creation and switching."""
@@ -218,7 +220,7 @@ async def configure_post(
                 "error_message": "Title and endpoint are required to create an analysis"
             }, status_code=400)
         
-        analysis = await create_analysis(title.strip(), endpoint.strip())
+        analysis = await create_analysis(title.strip(), endpoint.strip(), redact_sensitive)
         async with state_lock:
             current_analysis_id = analysis["id"]
             redirect_endpoint = analysis["endpoint"]
@@ -518,6 +520,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
     
     finally:
         # Save WebSocket session to history
+        # We no longer redact WebSocket messages as they are considered 'body stuff'
         async with state_lock:
             requests_history.append(ws_data)
         
@@ -568,6 +571,10 @@ async def catch_all(request: Request, path: str):
     
     # Save to history (response will be updated after streaming completes)
     async with state_lock:
+        current_analysis = get_analysis(current_analysis_id) if current_analysis_id else None
+        if current_analysis and current_analysis.get("redact_sensitive"):
+            request_data["headers"] = redact_sensitive_data(request_data["headers"])
+        
         requests_history.append(request_data)
         request_data_index = len(requests_history) - 1
     
@@ -640,17 +647,28 @@ async def catch_all(request: Request, path: str):
                         response_body_final = decompress_body(response_body_final, content_encoding)
                     
                     async with state_lock:
-                        requests_history[request_data_index]["response"] = {
+                        current_analysis = get_analysis(current_analysis_id) if current_analysis_id else None
+                        should_redact = current_analysis and current_analysis.get("redact_sensitive")
+                        
+                        headers = dict(response.headers)
+                        if should_redact:
+                            headers = redact_sensitive_data(headers)
+
+                        resp_data = {
                             "status_code": status_code,
-                            "headers": dict(response.headers),
+                            "headers": headers,
                             "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
                         }
+                            
+                        requests_history[request_data_index]["response"] = resp_data
                     await save_request(requests_history[request_data_index]["id"], requests_history[request_data_index])
                     
                     if response_body_final:
                         try:
                             async with state_lock:
-                                requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
+                                body_json = json.loads(response_body_final.decode("utf-8"))
+                                # Body is no longer redacted
+                                requests_history[request_data_index]["response"]["body_json"] = body_json
                             await save_request(requests_history[request_data_index]["id"], requests_history[request_data_index])
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             pass

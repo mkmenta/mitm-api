@@ -50,3 +50,34 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     
     return credentials.username
 
+
+def redact_sensitive_data(data: any) -> any:
+    """
+    Recursively redact sensitive information from dictionaries and lists.
+    Targets common keys like 'authorization', 'password', 'api-key', etc.
+    """
+    sensitive_keys = {
+        "authorization", "proxy-authorization", "cookie", "set-cookie",
+        "api-key", "apikey", "x-api-key", "access_token", "refresh_token",
+        "password", "secret", "token", "key", "auth"
+    }
+
+    if isinstance(data, dict):
+        redacted = {}
+        for k, v in data.items():
+            k_lower = k.lower()
+            # Use exact match for keys like 'token' to avoid matching 'tokens'
+            is_sensitive = k_lower in sensitive_keys or any(sk in k_lower for sk in ["authorization", "secret", "password", "key"])
+            
+            if is_sensitive:
+                if isinstance(v, str) and v.lower().startswith("bearer "):
+                    redacted[k] = "Bearer [REDACTED]"
+                else:
+                    redacted[k] = "[REDACTED]"
+            else:
+                redacted[k] = redact_sensitive_data(v)
+        return redacted
+    elif isinstance(data, list):
+        return [redact_sensitive_data(item) for item in data]
+    else:
+        return data

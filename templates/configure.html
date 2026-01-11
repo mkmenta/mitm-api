@@ -83,6 +83,10 @@
     <div class="analysis-info">
         <strong>Requests:</strong> <span>{{ num_requests }}</span>
     </div>
+    <div class="analysis-info">
+        <strong>Redaction:</strong> <span>{% if current_analysis.redact_sensitive %}✅ Enabled{% else %}❌ Disabled{%
+            endif %}</span>
+    </div>
     <div style="margin-top: 15px;">
         <a href="/___view_last/{{ num_requests }}">View Latest Request</a> |
         <a href="/___view_last/1">View First Request</a>
@@ -129,6 +133,11 @@
         <div class="form-group">
             <label for="endpoint">Endpoint URL:</label>
             <input type="text" id="endpoint" name="endpoint" placeholder="https://example.com/api" required>
+        </div>
+        <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+            <input type="checkbox" id="redact_sensitive" name="redact_sensitive" value="true" style="width: auto;">
+            <label for="redact_sensitive" style="margin-bottom: 0;">Redact sensitive data (API keys, tokens,
+                passwords)</label>
         </div>
         <button type="submit">Create Analysis</button>
     </form>
