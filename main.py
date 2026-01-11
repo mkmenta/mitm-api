@@ -546,12 +546,50 @@ async def catch_all(request: Request, path: str):
     }
     
     # Try to parse as JSON if possible
+    payload = None
     if body:
         try:
-            request_data["body_json"] = json.loads(body.decode("utf-8"))
+            payload = json.loads(body.decode("utf-8"))
+            request_data["body_json"] = payload
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
-    
+
+    # Normalize payload if it's JSON (reference: api.py lines 110-136)
+    normalized_payload = False
+    force_completion = False
+    if isinstance(payload, dict):
+        if "messages" not in payload and "input" in payload:
+            input_value = payload.get("input")
+            if isinstance(input_value, list):
+                payload = dict(payload)
+                payload["messages"] = input_value
+                payload.pop("input", None)
+                normalized_payload = True
+            elif isinstance(input_value, str):
+                payload = dict(payload)
+                payload["prompt"] = input_value
+                payload.pop("input", None)
+                normalized_payload = True
+                force_completion = True
+
+        if "messages" not in payload and "prompt" in payload:
+            prompt_value = payload.get("prompt")
+            if isinstance(prompt_value, list):
+                if all(isinstance(item, dict) for item in prompt_value):
+                    payload = dict(payload)
+                    payload["messages"] = prompt_value
+                    payload.pop("prompt", None)
+                    normalized_payload = True
+                elif all(isinstance(item, str) for item in prompt_value):
+                    payload = dict(payload)
+                    payload["prompt"] = "\n".join(prompt_value)
+                    normalized_payload = True
+
+    if normalized_payload:
+        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        request_data["body"] = body.decode("utf-8")
+        request_data["body_json"] = payload
+
     # Save to history (response will be updated after streaming completes)
     async with state_lock:
         current_analysis = get_analysis(current_analysis_id) if current_analysis_id else None
@@ -564,7 +602,11 @@ async def catch_all(request: Request, path: str):
     await save_request(request_data["id"], request_data)
     
     # Forward request to configured endpoint
-    target_url = f"{local_redirect_endpoint.rstrip('/')}/{path}" if path else local_redirect_endpoint.rstrip('/')
+    target_path = path
+    if force_completion and path.lstrip("/").endswith("v1/chat/completions"):
+        target_path = path.replace("v1/chat/completions", "v1/completions")
+        
+    target_url = f"{local_redirect_endpoint.rstrip('/')}/{target_path}" if target_path else local_redirect_endpoint.rstrip('/')
     if request.query_params:
         target_url += f"?{request.query_params}"
     
