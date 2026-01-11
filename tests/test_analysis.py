@@ -147,7 +147,9 @@ def test_request_persistence_per_analysis(client, auth_tuple):
     
     # Verify request was saved in analysis folder
     analysis_dir = main.get_analysis_dir(analysis_id)
-    request_file = os.path.join(analysis_dir, "0.json")
+    files = [f for f in os.listdir(analysis_dir) if f.endswith(".json")]
+    assert len(files) == 1
+    request_file = os.path.join(analysis_dir, files[0])
     assert os.path.exists(request_file)
     
     # Verify content
@@ -201,11 +203,13 @@ def test_requests_separate_by_analysis(client, auth_tuple):
     assert len(analysis2_files) == 1
     
     # Verify the requests are different
-    with open(os.path.join(analysis1_dir, "0.json")) as f:
+    file1 = os.listdir(analysis1_dir)[0]
+    with open(os.path.join(analysis1_dir, file1)) as f:
         data1 = json.load(f)
         assert data1["path"] == "/request1"
     
-    with open(os.path.join(analysis2_dir, "0.json")) as f:
+    file2 = os.listdir(analysis2_dir)[0]
+    with open(os.path.join(analysis2_dir, file2)) as f:
         data2 = json.load(f)
         assert data2["path"] == "/request2"
 
@@ -241,7 +245,7 @@ def test_load_analyses_on_startup():
         "method": "GET",
         "timestamp": "2024-01-01T00:00:00"
     }
-    with open(os.path.join(main.get_analysis_dir("test-123"), "0.json"), "w") as f:
+    with open(os.path.join(main.get_analysis_dir("test-123"), "test-uuid.json"), "w") as f:
         json.dump(test_request, f)
     
     # Reset state
