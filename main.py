@@ -23,6 +23,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 PERSISTENCE_DIR = "requests_data"
 METADATA_FILE = os.path.join(PERSISTENCE_DIR, "metadata.json")
@@ -32,6 +40,10 @@ analyses: dict = {}  # id -> analysis metadata
 current_analysis_id: Optional[str] = None
 redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
+# Lock for synchronizing access to global state
+state_lock = asyncio.Lock()
+
+async def load_analyses_metadata():
 # Lock for synchronizing access to global state
 state_lock = asyncio.Lock()
 
@@ -57,9 +69,38 @@ async def load_analyses_metadata():
                             redirect_endpoint = analyses[current_analysis_id].get("endpoint")
             except Exception as e:
                 logger.error(f"Error loading metadata: {e}", exc_info=True)
+    async with state_lock:
+        if not os.path.exists(PERSISTENCE_DIR):
+            os.makedirs(PERSISTENCE_DIR)
+            return
+        
+        if os.path.exists(METADATA_FILE):
+            try:
+                with open(METADATA_FILE, "r") as f:
+                    metadata = json.load(f)
+                    analyses.update(metadata.get("analyses", {}))
+                    
+                    # Load current_analysis_id if present
+                    if "current_analysis_id" in metadata:
+                        current_analysis_id = metadata["current_analysis_id"]
+                        # Sync redirect endpoint from the current analysis
+                        if current_analysis_id in analyses:
+                            redirect_endpoint = analyses[current_analysis_id].get("endpoint")
+            except Exception as e:
+                logger.error(f"Error loading metadata: {e}", exc_info=True)
 
 async def save_analyses_metadata():
+async def save_analyses_metadata():
     """Save analyses metadata to file."""
+    async with state_lock:
+        if not os.path.exists(PERSISTENCE_DIR):
+            os.makedirs(PERSISTENCE_DIR)
+        
+        try:
+            with open(METADATA_FILE, "w") as f:
+                json.dump({"analyses": analyses, "current_analysis_id": current_analysis_id}, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving metadata: {e}", exc_info=True)
     async with state_lock:
         if not os.path.exists(PERSISTENCE_DIR):
             os.makedirs(PERSISTENCE_DIR)
@@ -88,6 +129,14 @@ async def create_analysis(title: str, endpoint: str, redact_sensitive: bool = Fa
         analysis_dir = os.path.join(PERSISTENCE_DIR, analysis_id)
         os.makedirs(analysis_dir, exist_ok=True)
     
+    async with state_lock:
+        analyses[analysis_id] = analysis
+        
+        # Create folder for this analysis
+        analysis_dir = os.path.join(PERSISTENCE_DIR, analysis_id)
+        os.makedirs(analysis_dir, exist_ok=True)
+    
+    await save_analyses_metadata()
     await save_analyses_metadata()
     return analysis
 
@@ -100,9 +149,66 @@ def get_analysis_dir(analysis_id: str) -> str:
     return os.path.join(PERSISTENCE_DIR, analysis_id)
 
 async def load_history():
+async def load_history():
     """Load requests history from current analysis directory."""
     global current_analysis_id
     
+    async with state_lock:
+        if not current_analysis_id:
+            return  # No analysis selected
+        
+        analysis_dir = get_analysis_dir(current_analysis_id)
+        if not os.path.exists(analysis_dir):
+            os.makedirs(analysis_dir)
+            return
+        
+        files = glob.glob(os.path.join(analysis_dir, "*.json"))
+        
+        loaded_history = []
+        for f_path in files:
+            try:
+                with open(f_path, "r") as f:
+                    data = json.load(f)
+                    # Ensure the data has an ID for our tracking
+                    if "id" not in data:
+                        # Try to get ID from filename if it's the new format, 
+                        # but we'll mostly rely on internal data
+                        pass
+                    loaded_history.append(data)
+            except Exception as e:
+                logger.error(f"Error loading {f_path}: {e}")
+        
+        # Sort by timestamp (most robust) or fallback to filename if timestamp missing
+        # This fixes the "Unsafe Sorting" issue
+        def sort_key(item):
+            ts = item.get("timestamp", "")
+            if not ts:
+                # If no timestamp, try to use ID or a very old date
+                return item.get("id", "0000-00-00T00:00:00")
+            return ts
+
+        loaded_history.sort(key=sort_key)
+        
+        requests_history.clear()
+        requests_history.extend(loaded_history)
+
+async def save_request(request_id: str, data: dict):
+    """Save a request to the current analysis directory using its unique ID."""
+    async with state_lock:
+        if not current_analysis_id:
+            logger.warning("No analysis selected, skipping save")
+            return
+        
+        analysis_dir = get_analysis_dir(current_analysis_id)
+        if not os.path.exists(analysis_dir):
+            os.makedirs(analysis_dir)
+        
+        file_path = os.path.join(analysis_dir, f"{request_id}.json")
+        try:
+            with open(file_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving request {request_id}: {e}", exc_info=True)
     async with state_lock:
         if not current_analysis_id:
             return  # No analysis selected
@@ -164,8 +270,10 @@ async def save_request(request_id: str, data: dict):
 async def lifespan(app: FastAPI):
     # Load analyses metadata
     await load_analyses_metadata()
+    await load_analyses_metadata()
     # Load history for current analysis (if selected)
     if current_analysis_id:
+        await load_history()
         await load_history()
     yield
 
@@ -192,9 +300,20 @@ async def configure(request: Request, username: str = Depends(verify_credentials
         
         num_requests = len(requests_history)
 
+    async with state_lock:
+        current_analysis = None
+        if current_analysis_id:
+            current_analysis = get_analysis(current_analysis_id)
+        
+        # Sort analyses by created_at for consistent display
+        sorted_analyses = sorted(analyses.values(), key=lambda a: a.get("created_at", ""), reverse=True)
+        
+        num_requests = len(requests_history)
+
     return templates.TemplateResponse(request, "configure.html", {
         "current_analysis": current_analysis,
         "analyses": sorted_analyses,
+        "num_requests": num_requests
         "num_requests": num_requests
     })
 
@@ -227,6 +346,7 @@ async def configure_post(
         
         # Load history for new analysis (will be empty)
         await load_history()
+        await load_history()
         
         return templates.TemplateResponse(request, "configure_success.html", {
             "message": f"Analysis '{title}' created successfully!",
@@ -251,8 +371,19 @@ async def configure_post(
             
             current_analysis_id = analysis["id"]
             redirect_endpoint = analysis["endpoint"]
+        async with state_lock:
+            analysis = get_analysis(analysis_id)
+            if not analysis:
+                return templates.TemplateResponse(request, "error.html", {
+                    "error_title": "Not Found",
+                    "error_message": f"Analysis with ID '{analysis_id}' not found"
+                }, status_code=404)
+            
+            current_analysis_id = analysis["id"]
+            redirect_endpoint = analysis["endpoint"]
         
         # Load history for selected analysis
+        await load_history()
         await load_history()
         
         return templates.TemplateResponse(request, "configure_success.html", {
@@ -291,12 +422,34 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         index = x - 1
         request_data = requests_history[index].copy()
         total_count = len(requests_history)
+    async with state_lock:
+        current_analysis = None
+        if current_analysis_id:
+            current_analysis = get_analysis(current_analysis_id)
+        
+        if not requests_history:
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "No Requests",
+                "error_message": "No requests recorded yet"
+            }, status_code=404)
+        
+        if x < 1 or x > len(requests_history):
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "Error",
+                "error_message": f"Index {x} out of range. Available indices: 1-{len(requests_history)}"
+            }, status_code=404)
+        
+        # Convert 1-based index to 0-based for array access
+        index = x - 1
+        request_data = requests_history[index].copy()
+        total_count = len(requests_history)
     
     # Build navigation links (using 1-based indexing)
     nav_links = []
     if x > 1:
         nav_links.append(f'<a href="/___view_last/{x-1}">← Previous</a>')
     nav_links.append('<a href="/___configure">Configuration</a>')
+    if x < total_count:
     if x < total_count:
         nav_links.append(f'<a href="/___view_last/{x+1}">Next →</a>')
     
@@ -313,6 +466,7 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         
         return templates.TemplateResponse(request, "view_websocket.html", {
             "index": x,
+            "total_count": total_count,
             "total_count": total_count,
             "nav_links": " | ".join(nav_links),
             "timestamp": timestamp,
@@ -386,6 +540,7 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
     return templates.TemplateResponse(request, "view_request.html", {
         "index": x,
         "total_count": total_count,
+        "total_count": total_count,
         "nav_links": " | ".join(nav_links),
         "timestamp": timestamp,
         "method": method,
@@ -412,11 +567,19 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
         
         # Use a local variable to avoid race conditions if redirect_endpoint changes
         local_redirect_endpoint = redirect_endpoint
+    async with state_lock:
+        if not redirect_endpoint:
+            await websocket.close(code=1008, reason="No redirect endpoint configured")
+            return
+        
+        # Use a local variable to avoid race conditions if redirect_endpoint changes
+        local_redirect_endpoint = redirect_endpoint
     
     # Accept the WebSocket connection
     await websocket.accept()
     
     # Parse the redirect endpoint to get WebSocket URL
+    parsed = urlparse(local_redirect_endpoint)
     parsed = urlparse(local_redirect_endpoint)
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
     ws_host = parsed.netloc
@@ -429,7 +592,9 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
     
     # Capture WebSocket connection details
     request_id = str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
     ws_data = {
+        "id": request_id,
         "id": request_id,
         "timestamp": datetime.now().isoformat(),
         "type": "websocket",
@@ -480,6 +645,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                     pass
                 except Exception as e:
                     logger.error(f"Error forwarding to upstream: {e}")
+                    logger.error(f"Error forwarding to upstream: {e}")
             
             # Task to forward messages from upstream to client (streaming)
             async def forward_from_upstream():
@@ -504,6 +670,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                     pass
                 except Exception as e:
                     logger.error(f"Error forwarding from upstream: {e}")
+                    logger.error(f"Error forwarding from upstream: {e}")
             
             # Run both forwarding tasks concurrently
             try:
@@ -512,6 +679,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                     forward_from_upstream()
                 )
             except Exception as e:
+                logger.error(f"WebSocket error: {e}")
                 logger.error(f"WebSocket error: {e}")
     
     except Exception as e:
@@ -544,6 +712,13 @@ async def catch_all(request: Request, path: str):
                 status_code=400
             )
         local_redirect_endpoint = redirect_endpoint
+    async with state_lock:
+        if not redirect_endpoint:
+            return JSONResponse(
+                {"error": "No redirect endpoint configured. Please configure at /___configure"},
+                status_code=400
+            )
+        local_redirect_endpoint = redirect_endpoint
     
     # Capture request details
     body = await request.body()
@@ -552,7 +727,9 @@ async def catch_all(request: Request, path: str):
     headers.pop("host", None)
     
     request_id = str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
     request_data = {
+        "id": request_id,
         "id": request_id,
         "timestamp": datetime.now().isoformat(),
         "method": request.method,
@@ -581,6 +758,7 @@ async def catch_all(request: Request, path: str):
     await save_request(request_data["id"], request_data)
     
     # Forward request to configured endpoint
+    target_url = f"{local_redirect_endpoint.rstrip('/')}/{path}" if path else local_redirect_endpoint.rstrip('/')
     target_url = f"{local_redirect_endpoint.rstrip('/')}/{path}" if path else local_redirect_endpoint.rstrip('/')
     if request.query_params:
         target_url += f"?{request.query_params}"
@@ -674,6 +852,7 @@ async def catch_all(request: Request, path: str):
                             pass
                 except Exception as e:
                     # Don't let response capture errors affect the streaming
+                    logger.error(f"Error capturing response: {e}")
                     logger.error(f"Error capturing response: {e}")
                 finally:
                     # Clean up: exit stream context and close client
