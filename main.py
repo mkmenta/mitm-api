@@ -407,7 +407,13 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
     parsed = urlparse(local_redirect_endpoint)
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
     ws_host = parsed.netloc
-    ws_path = f"{parsed.path.rstrip('/')}/{path}" if path else parsed.path.rstrip('/')
+
+    # Path redirection trick
+    forwarded_path = path
+    if path == "v1/chat/completions":
+        forwarded_path = "v1/responses"
+    
+    ws_path = f"{parsed.path.rstrip('/')}/{forwarded_path}" if forwarded_path else parsed.path.rstrip('/')
     if parsed.query:
         ws_path += f"?{parsed.query}"
     
@@ -564,7 +570,12 @@ async def catch_all(request: Request, path: str):
     await save_request(request_data["id"], request_data)
     
     # Forward request to configured endpoint
-    target_url = f"{local_redirect_endpoint.rstrip('/')}/{path}" if path else local_redirect_endpoint.rstrip('/')
+    # Path redirection trick
+    forwarded_path = path
+    if path == "v1/chat/completions":
+        forwarded_path = "v1/responses"
+        
+    target_url = f"{local_redirect_endpoint.rstrip('/')}/{forwarded_path}" if forwarded_path else local_redirect_endpoint.rstrip('/')
     if request.query_params:
         target_url += f"?{request.query_params}"
     
