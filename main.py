@@ -13,16 +13,89 @@ from utils import decompress_body, verify_credentials
 
 import glob
 from contextlib import asynccontextmanager
+import time
+import uuid
 
 PERSISTENCE_DIR = "requests_data"
+METADATA_FILE = os.path.join(PERSISTENCE_DIR, "metadata.json")
 
-def load_history():
-    """Load requests history from persistence directory."""
+# Analysis metadata structure: {"id": str, "title": str, "endpoint": str, "created_at": str}
+analyses: dict = {}  # id -> analysis metadata
+current_analysis_id: Optional[str] = None
+redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
+
+def load_analyses_metadata():
+    """Load analyses metadata from persistence directory."""
+    global analyses, current_analysis_id, redirect_endpoint
     if not os.path.exists(PERSISTENCE_DIR):
         os.makedirs(PERSISTENCE_DIR)
         return
     
-    files = glob.glob(os.path.join(PERSISTENCE_DIR, "*.json"))
+    if os.path.exists(METADATA_FILE):
+        try:
+            with open(METADATA_FILE, "r") as f:
+                metadata = json.load(f)
+                analyses.update(metadata.get("analyses", {}))
+                
+                # Load current_analysis_id if present
+                if "current_analysis_id" in metadata:
+                    current_analysis_id = metadata["current_analysis_id"]
+                    # Sync redirect endpoint from the current analysis
+                    if current_analysis_id in analyses:
+                        redirect_endpoint = analyses[current_analysis_id].get("endpoint")
+        except Exception as e:
+            print(f"Error loading metadata: {e}")
+
+def save_analyses_metadata():
+    """Save analyses metadata to file."""
+    if not os.path.exists(PERSISTENCE_DIR):
+        os.makedirs(PERSISTENCE_DIR)
+    
+    try:
+        with open(METADATA_FILE, "w") as f:
+            json.dump({"analyses": analyses, "current_analysis_id": current_analysis_id}, f, indent=2)
+    except Exception as e:
+        print(f"Error saving metadata: {e}")
+
+def create_analysis(title: str, endpoint: str) -> dict:
+    """Create a new analysis with unique ID."""
+    analysis_id = str(uuid.uuid4())
+    analysis = {
+        "id": analysis_id,
+        "title": title,
+        "endpoint": endpoint,
+        "created_at": datetime.now().isoformat()
+    }
+    analyses[analysis_id] = analysis
+    
+    # Create folder for this analysis
+    analysis_dir = os.path.join(PERSISTENCE_DIR, analysis_id)
+    os.makedirs(analysis_dir, exist_ok=True)
+    
+    save_analyses_metadata()
+    return analysis
+
+def get_analysis(analysis_id: str) -> Optional[dict]:
+    """Get analysis details by ID."""
+    return analyses.get(analysis_id)
+
+def get_analysis_dir(analysis_id: str) -> str:
+    """Get the directory path for an analysis."""
+    return os.path.join(PERSISTENCE_DIR, analysis_id)
+
+def load_history():
+    """Load requests history from current analysis directory."""
+    global current_analysis_id
+    
+    if not current_analysis_id:
+        return  # No analysis selected
+    
+    analysis_dir = get_analysis_dir(current_analysis_id)
+    if not os.path.exists(analysis_dir):
+        os.makedirs(analysis_dir)
+        return
+    
+    files = glob.glob(os.path.join(analysis_dir, "*.json"))
     # Sort by filename (assuming filenames are numerical indices)
     # Actually, if we name them 0.json, 1.json, etc., simple sort might fail on 10 vs 2.
     # We should extract the integer index.
@@ -37,11 +110,18 @@ def load_history():
             print(f"Error loading {f_path}: {e}")
 
 def save_request(index: int, data: dict):
-    """Save a request to the persistence directory."""
-    if not os.path.exists(PERSISTENCE_DIR):
-        os.makedirs(PERSISTENCE_DIR)
+    """Save a request to the current analysis directory."""
+    global current_analysis_id
     
-    file_path = os.path.join(PERSISTENCE_DIR, f"{index}.json")
+    if not current_analysis_id:
+        print("Warning: No analysis selected, skipping save")
+        return
+    
+    analysis_dir = get_analysis_dir(current_analysis_id)
+    if not os.path.exists(analysis_dir):
+        os.makedirs(analysis_dir)
+    
+    file_path = os.path.join(analysis_dir, f"{index}.json")
     try:
         with open(file_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -50,8 +130,11 @@ def save_request(index: int, data: dict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load history on startup
-    load_history()
+    # Load analyses metadata
+    load_analyses_metadata()
+    # Load history for current analysis (if selected)
+    if current_analysis_id:
+        load_history()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -62,31 +145,101 @@ templates = Jinja2Templates(directory="templates")
 
 # In-memory storage for debugging
 requests_history = []
-redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
 
 @app.get("/___configure", response_class=HTMLResponse)
 async def configure(request: Request, username: str = Depends(verify_credentials)):
     """Show HTML form to configure the redirect endpoint."""
-    current_endpoint = redirect_endpoint or "Not configured"
+    global current_analysis_id
+    
+    current_analysis = None
+    if current_analysis_id:
+        current_analysis = get_analysis(current_analysis_id)
+    
+    # Sort analyses by created_at for consistent display
+    sorted_analyses = sorted(analyses.values(), key=lambda a: a.get("created_at", ""), reverse=True)
+    
     return templates.TemplateResponse(request, "configure.html", {
-        "current_endpoint": current_endpoint
+        "current_analysis": current_analysis,
+        "analyses": sorted_analyses,
+        "num_requests": len(requests_history)
     })
 
 
 @app.post("/___configure")
-async def configure_post(request: Request, endpoint: str = Form(...), username: str = Depends(verify_credentials)):
-    """Save the redirect endpoint configuration."""
-    global redirect_endpoint
-    redirect_endpoint = endpoint.strip()
-    return templates.TemplateResponse(request, "configure_success.html", {
-        "redirect_endpoint": redirect_endpoint
-    }, headers={"Refresh": "2;url=/___configure"})
+async def configure_post(
+    request: Request, 
+    username: str = Depends(verify_credentials),
+    action: str = Form(...),
+    title: Optional[str] = Form(None),
+    endpoint: Optional[str] = Form(None),
+    analysis_id: Optional[str] = Form(None)
+):
+    """Handle analysis creation and switching."""
+    global current_analysis_id, redirect_endpoint
+    
+    if action == "create":
+        # Create new analysis
+        if not title or not endpoint:
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "Invalid Input",
+                "error_message": "Title and endpoint are required to create an analysis"
+            }, status_code=400)
+        
+        analysis = create_analysis(title.strip(), endpoint.strip())
+        current_analysis_id = analysis["id"]
+        redirect_endpoint = analysis["endpoint"]
+        
+        # Load history for new analysis (will be empty)
+        load_history()
+        
+        return templates.TemplateResponse(request, "configure_success.html", {
+            "message": f"Analysis '{title}' created successfully!",
+            "redirect_url": "/___configure"
+        }, headers={"Refresh": "2;url=/___configure"})
+    
+    elif action == "switch":
+        # Switch to existing analysis
+        if not analysis_id:
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "Invalid Input",
+                "error_message": "Analysis ID is required to switch"
+            }, status_code=400)
+        
+        analysis = get_analysis(analysis_id)
+        if not analysis:
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "Not Found",
+                "error_message": f"Analysis with ID '{analysis_id}' not found"
+            }, status_code=404)
+        
+        current_analysis_id = analysis["id"]
+        redirect_endpoint = analysis["endpoint"]
+        
+        # Load history for selected analysis
+        load_history()
+        
+        return templates.TemplateResponse(request, "configure_success.html", {
+            "message": f"Switched to analysis '{analysis['title']}'",
+            "redirect_url": "/___configure"
+        }, headers={"Refresh": "2;url=/___configure"})
+    
+    else:
+        return templates.TemplateResponse(request, "error.html", {
+            "error_title": "Invalid Action",
+            "error_message": f"Unknown action: {action}"
+        }, status_code=400)
 
 
 @app.get("/___view_last/{x}")
 async def view_last(request: Request, x: int, username: str = Depends(verify_credentials)):
     """View the last request at index x."""
+    global current_analysis_id
+    
+    current_analysis = None
+    if current_analysis_id:
+        current_analysis = get_analysis(current_analysis_id)
+    
     if not requests_history:
         return templates.TemplateResponse(request, "error.html", {
             "error_title": "No Requests",
@@ -130,7 +283,8 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
             "path": path,
             "ws_url": ws_url,
             "messages": messages,
-            "error": error
+            "error": error,
+            "current_analysis": current_analysis
         })
     
     # Extract metadata for HTTP requests
@@ -207,7 +361,8 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         "response_data": response_template_data,
         "resp_body_content": resp_body_content,
         "resp_body_type": resp_body_type,
-        "status_color": status_color
+        "status_color": status_color,
+        "current_analysis": current_analysis
     })
 
 

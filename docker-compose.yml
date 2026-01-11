@@ -1,5 +1,6 @@
 services:
   mitm-api:
+    # build: .
     image: ghcr.io/mkmenta/mitm-api:latest
     pull_policy: always
     ports:
@@ -9,4 +10,6 @@ services:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
       - DEFAULT_REDIRECT_ENDPOINT=${DEFAULT_REDIRECT_ENDPOINT:-}
+    volumes:
+      - ./requests_data:/app/requests_data
 

@@ -4,22 +4,133 @@
 
 {% block extra_styles %}
 <style>
-    body { max-width: 600px; }
+    body {
+        max-width: 800px;
+    }
+
+    .section {
+        margin: 20px 0;
+        padding: 20px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #f9f9f9;
+    }
+
+    .section h2 {
+        margin-top: 0;
+        color: #333;
+        font-size: 1.3em;
+    }
+
+    .current-analysis {
+        background: #e8f4f8;
+        border-color: #4a90a4;
+    }
+
+    .analysis-info {
+        margin: 10px 0;
+    }
+
+    .analysis-info strong {
+        display: inline-block;
+        width: 120px;
+    }
+
+    .locked {
+        color: #666;
+        font-style: italic;
+    }
+
+    select,
+    input[type="text"] {
+        width: 100%;
+        max-width: 500px;
+    }
+
+    .form-group {
+        margin: 15px 0;
+    }
+
+    .form-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+    }
+
+    button {
+        margin-top: 10px;
+    }
+
+    .no-analysis {
+        color: #999;
+        font-style: italic;
+    }
 </style>
 {% endblock %}
 
 {% block content %}
 <h1>MITM Debugger Configuration</h1>
-<form method="post" action="/___configure">
-    <label for="endpoint">Redirect Endpoint URL:</label>
-    <input type="text" id="endpoint" name="endpoint" placeholder="https://example.com/api" value="">
-    <button type="submit">Save Configuration</button>
-</form>
-<div class="status">
-    <strong>Current endpoint:</strong> <span id="current">{{ current_endpoint }}</span>
+
+{% if current_analysis %}
+<div class="section current-analysis">
+    <h2>📊 Current Analysis</h2>
+    <div class="analysis-info">
+        <strong>Title:</strong> <span>{{ current_analysis.title }}</span>
+    </div>
+    <div class="analysis-info">
+        <strong>Endpoint:</strong> <span class="locked">{{ current_analysis.endpoint }} (locked)</span>
+    </div>
+    <div class="analysis-info">
+        <strong>Requests:</strong> <span>{{ num_requests }}</span>
+    </div>
+    <div style="margin-top: 15px;">
+        <a href="/___view_last/{{ num_requests }}">View Latest Request</a> |
+        <a href="/___view_last/1">View First Request</a>
+    </div>
 </div>
-<div style="margin-top: 20px;">
-    <a href="/___view_last/1">View Last Request</a>
+{% else %}
+<div class="section">
+    <p class="no-analysis">⚠️ No analysis selected. Create a new analysis or switch to an existing one below.</p>
+</div>
+{% endif %}
+
+<div class="section">
+    <h2>🔄 Switch Analysis</h2>
+    {% if analyses %}
+    <form method="post" action="/___configure">
+        <input type="hidden" name="action" value="switch">
+        <div class="form-group">
+            <label for="analysis_id">Select Analysis:</label>
+            <select id="analysis_id" name="analysis_id" required>
+                <option value="">-- Select an analysis --</option>
+                {% for analysis in analyses %}
+                <option value="{{ analysis.id }}" {% if current_analysis and analysis.id==current_analysis.id
+                    %}selected{% endif %}>
+                    {{ analysis.title }} ({{ analysis.endpoint }})
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit">Switch to Selected Analysis</button>
+    </form>
+    {% else %}
+    <p class="no-analysis">No existing analyses found. Create one below!</p>
+    {% endif %}
+</div>
+
+<div class="section">
+    <h2>➕ Create New Analysis</h2>
+    <form method="post" action="/___configure">
+        <input type="hidden" name="action" value="create">
+        <div class="form-group">
+            <label for="title">Analysis Title:</label>
+            <input type="text" id="title" name="title" placeholder="e.g., Production API Testing" required>
+        </div>
+        <div class="form-group">
+            <label for="endpoint">Endpoint URL:</label>
+            <input type="text" id="endpoint" name="endpoint" placeholder="https://example.com/api" required>
+        </div>
+        <button type="submit">Create Analysis</button>
+    </form>
 </div>
 {% endblock %}
-

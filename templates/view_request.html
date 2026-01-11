@@ -5,6 +5,10 @@
 {% block content %}
 <h1>Request Details <span class="info-badge">#{{ index }} of {{ total_count }}</span></h1>
 
+{% if current_analysis %}
+<p style="margin-top: -10px; color: #666;"><strong>Analysis:</strong> {{ current_analysis.title }}</p>
+{% endif %}
+
 <div class="navigation">
     {{ nav_links|safe }}
 </div>
@@ -19,7 +23,8 @@
     </tr>
     <tr>
         <td><strong>Method</strong></td>
-        <td><span style="background: #007bff; color: white; padding: 4px 8px; border-radius: 3px;">{{ method }}</span></td>
+        <td><span style="background: #007bff; color: white; padding: 4px 8px; border-radius: 3px;">{{ method }}</span>
+        </td>
     </tr>
     <tr>
         <td><strong>Path</strong></td>
@@ -38,14 +43,16 @@
         <th>Value</th>
     </tr>
     {% if headers %}
-        {% for key, value in headers.items() %}
-        <tr>
-            <td><strong>{{ key }}</strong></td>
-            <td>{{ value }}</td>
-        </tr>
-        {% endfor %}
+    {% for key, value in headers.items() %}
+    <tr>
+        <td><strong>{{ key }}</strong></td>
+        <td>{{ value }}</td>
+    </tr>
+    {% endfor %}
     {% else %}
-        <tr><td colspan="2">No headers</td></tr>
+    <tr>
+        <td colspan="2">No headers</td>
+    </tr>
     {% endif %}
 </table>
 
@@ -66,7 +73,9 @@
     </tr>
     <tr>
         <td><strong>Status Code</strong></td>
-        <td><span style="background: {{ status_color }}; color: white; padding: 4px 12px; border-radius: 3px; font-weight: bold;">{{ response_data.status_code }}</span></td>
+        <td><span
+                style="background: {{ status_color }}; color: white; padding: 4px 12px; border-radius: 3px; font-weight: bold;">{{
+                response_data.status_code }}</span></td>
     </tr>
 </table>
 
@@ -77,14 +86,16 @@
         <th>Value</th>
     </tr>
     {% if response_data.headers %}
-        {% for key, value in response_data.headers.items() %}
-        <tr>
-            <td><strong>{{ key }}</strong></td>
-            <td>{{ value }}</td>
-        </tr>
-        {% endfor %}
+    {% for key, value in response_data.headers.items() %}
+    <tr>
+        <td><strong>{{ key }}</strong></td>
+        <td>{{ value }}</td>
+    </tr>
+    {% endfor %}
     {% else %}
-        <tr><td colspan="2">No headers</td></tr>
+    <tr>
+        <td colspan="2">No headers</td>
+    </tr>
     {% endif %}
 </table>
 
@@ -98,7 +109,7 @@
 </div>
 {% else %}
 <div class="warning" style="margin-top: 40px;">
-    <strong>Note:</strong> Response not yet captured. This may be because the request is still streaming, 
+    <strong>Note:</strong> Response not yet captured. This may be because the request is still streaming,
     or the response capture feature was not yet implemented when this request was made.
 </div>
 {% endif %}
@@ -107,4 +118,3 @@
     {{ nav_links|safe }}
 </div>
 {% endblock %}
-
