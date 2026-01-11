@@ -15,6 +15,14 @@ import glob
 from contextlib import asynccontextmanager
 import time
 import uuid
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 PERSISTENCE_DIR = "requests_data"
 METADATA_FILE = os.path.join(PERSISTENCE_DIR, "metadata.json")
@@ -48,7 +56,7 @@ async def load_analyses_metadata():
                         if current_analysis_id in analyses:
                             redirect_endpoint = analyses[current_analysis_id].get("endpoint")
             except Exception as e:
-                print(f"Error loading metadata: {e}")
+                logger.error(f"Error loading metadata: {e}", exc_info=True)
 
 async def save_analyses_metadata():
     """Save analyses metadata to file."""
@@ -60,7 +68,7 @@ async def save_analyses_metadata():
             with open(METADATA_FILE, "w") as f:
                 json.dump({"analyses": analyses, "current_analysis_id": current_analysis_id}, f, indent=2)
         except Exception as e:
-            print(f"Error saving metadata: {e}")
+            logger.error(f"Error saving metadata: {e}", exc_info=True)
 
 async def create_analysis(title: str, endpoint: str) -> dict:
     """Create a new analysis with unique ID."""
@@ -104,36 +112,52 @@ async def load_history():
             return
         
         files = glob.glob(os.path.join(analysis_dir, "*.json"))
-        # Sort by filename (assuming filenames are numerical indices)
-        # Actually, if we name them 0.json, 1.json, etc., simple sort might fail on 10 vs 2.
-        # We should extract the integer index.
-        files.sort(key=lambda f: int(os.path.basename(f).split('.')[0]))
         
-        requests_history.clear()
+        loaded_history = []
         for f_path in files:
             try:
                 with open(f_path, "r") as f:
-                    requests_history.append(json.load(f))
+                    data = json.load(f)
+                    # Ensure the data has an ID for our tracking
+                    if "id" not in data:
+                        # Try to get ID from filename if it's the new format, 
+                        # but we'll mostly rely on internal data
+                        pass
+                    loaded_history.append(data)
             except Exception as e:
-                print(f"Error loading {f_path}: {e}")
+                logger.error(f"Error loading {f_path}: {e}")
+        
+        # Sort by timestamp (most robust) or fallback to filename if timestamp missing
+        # This fixes the "Unsafe Sorting" issue
+        def sort_key(item):
+            ts = item.get("timestamp", "")
+            if not ts:
+                # If no timestamp, try to use ID or a very old date
+                return item.get("id", "0000-00-00T00:00:00")
+            return ts
 
-async def save_request(index: int, data: dict):
-    """Save a request to the current analysis directory."""
+        loaded_history.sort(key=sort_key)
+        
+        requests_history.clear()
+        requests_history.extend(loaded_history)
+
+async def save_request(request_id: str, data: dict):
+    """Save a request to the current analysis directory using its unique ID."""
     async with state_lock:
         if not current_analysis_id:
-            print("Warning: No analysis selected, skipping save")
+            logger.warning("No analysis selected, skipping save")
             return
         
         analysis_dir = get_analysis_dir(current_analysis_id)
         if not os.path.exists(analysis_dir):
             os.makedirs(analysis_dir)
         
-        file_path = os.path.join(analysis_dir, f"{index}.json")
+        file_path = os.path.join(analysis_dir, f"{request_id}.json")
         try:
             with open(file_path, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"Error saving request {index}: {e}")
+            logger.error(f"Error saving request {request_id}: {e}", exc_info=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -402,7 +426,9 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
     ws_url = f"{ws_scheme}://{ws_host}{ws_path}"
     
     # Capture WebSocket connection details
+    request_id = str(uuid.uuid4())
     ws_data = {
+        "id": request_id,
         "timestamp": datetime.now().isoformat(),
         "type": "websocket",
         "path": f"/{path}" if path else "/",
@@ -451,7 +477,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                 except WebSocketDisconnect:
                     pass
                 except Exception as e:
-                    print(f"Error forwarding to upstream: {e}")
+                    logger.error(f"Error forwarding to upstream: {e}")
             
             # Task to forward messages from upstream to client (streaming)
             async def forward_from_upstream():
@@ -475,7 +501,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                 except websockets.exceptions.ConnectionClosed:
                     pass
                 except Exception as e:
-                    print(f"Error forwarding from upstream: {e}")
+                    logger.error(f"Error forwarding from upstream: {e}")
             
             # Run both forwarding tasks concurrently
             try:
@@ -484,7 +510,7 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
                     forward_from_upstream()
                 )
             except Exception as e:
-                print(f"WebSocket error: {e}")
+                logger.error(f"WebSocket error: {e}")
     
     except Exception as e:
         ws_data["error"] = str(e)
@@ -494,9 +520,8 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
         # Save WebSocket session to history
         async with state_lock:
             requests_history.append(ws_data)
-            request_data_index = len(requests_history) - 1
         
-        await save_request(request_data_index, ws_data)
+        await save_request(ws_data["id"], ws_data)
         try:
             await websocket.close()
         except Exception:
@@ -523,7 +548,9 @@ async def catch_all(request: Request, path: str):
     # Remove host header to avoid issues
     headers.pop("host", None)
     
+    request_id = str(uuid.uuid4())
     request_data = {
+        "id": request_id,
         "timestamp": datetime.now().isoformat(),
         "method": request.method,
         "path": f"/{path}" if path else "/",
@@ -544,7 +571,7 @@ async def catch_all(request: Request, path: str):
         requests_history.append(request_data)
         request_data_index = len(requests_history) - 1
     
-    await save_request(request_data_index, request_data)
+    await save_request(request_data["id"], request_data)
     
     # Forward request to configured endpoint
     target_url = f"{local_redirect_endpoint.rstrip('/')}/{path}" if path else local_redirect_endpoint.rstrip('/')
@@ -618,18 +645,18 @@ async def catch_all(request: Request, path: str):
                             "headers": dict(response.headers),
                             "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
                         }
-                    await save_request(request_data_index, requests_history[request_data_index])
+                    await save_request(requests_history[request_data_index]["id"], requests_history[request_data_index])
                     
                     if response_body_final:
                         try:
                             async with state_lock:
                                 requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
-                            await save_request(request_data_index, requests_history[request_data_index])
+                            await save_request(requests_history[request_data_index]["id"], requests_history[request_data_index])
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             pass
                 except Exception as e:
                     # Don't let response capture errors affect the streaming
-                    print(f"Error capturing response: {e}")
+                    logger.error(f"Error capturing response: {e}")
                 finally:
                     # Clean up: exit stream context and close client
                     await stream_ctx.__aexit__(None, None, None)

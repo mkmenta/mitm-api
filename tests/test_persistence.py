@@ -28,7 +28,12 @@ def test_persistence_lifecycle(client, auth_tuple):
     analysis_id = main.current_analysis_id
     assert analysis_id is not None
     
-    expected_file = os.path.join(main.get_analysis_dir(analysis_id), "0.json")
+    # Check that a .json file exists in the directory
+    analysis_dir = main.get_analysis_dir(analysis_id)
+    files = [f for f in os.listdir(analysis_dir) if f.endswith(".json")]
+    assert len(files) == 1
+    
+    expected_file = os.path.join(analysis_dir, files[0])
     assert os.path.exists(expected_file)
     
     with open(expected_file) as f:
@@ -50,8 +55,8 @@ def test_load_history_on_startup():
     if not os.path.exists(analysis_dir):
         os.makedirs(analysis_dir)
     
-    dummy_data = {"path": "/loaded-from-disk", "timestamp": "2023-01-01"}
-    with open(os.path.join(analysis_dir, "0.json"), "w") as f:
+    dummy_data = {"path": "/loaded-from-disk", "timestamp": "2023-01-01T12:00:00"}
+    with open(os.path.join(analysis_dir, "test-uuid.json"), "w") as f:
         json.dump(dummy_data, f)
         
     # 2. Reset in-memory history
@@ -68,3 +73,34 @@ def test_load_history_on_startup():
         # TestClient with lifespan should verify startup
         assert len(main.requests_history) == 1
         assert main.requests_history[0]["path"] == "/loaded-from-disk"
+
+def test_robust_sorting():
+    # Test that sorting works with mixed filenames and sorts by timestamp
+    analysis_id = "test-sorting"
+    main.analyses[analysis_id] = {"id": analysis_id, "title": "Sort", "endpoint": "http://example.com"}
+    main.current_analysis_id = analysis_id
+    
+    analysis_dir = main.get_analysis_dir(analysis_id)
+    os.makedirs(analysis_dir, exist_ok=True)
+    
+    # Data to create: out of order in terms of filename, but with timestamps
+    data_items = [
+        {"id": "c", "timestamp": "2023-01-01T12:00:03", "path": "/third"},
+        {"id": "a", "timestamp": "2023-01-01T12:00:01", "path": "/first"},
+        {"id": "b", "timestamp": "2023-01-01T12:00:02", "path": "/second"},
+    ]
+    
+    # Write files with names that would sort incorrectly alphabetically or as ints
+    # (though 'a', 'b', 'c' sort correctly, let's use ones that don't)
+    filenames = ["z.json", "10.json", "2.json"]
+    for i, item in enumerate(data_items):
+        with open(os.path.join(analysis_dir, filenames[i]), "w") as f:
+            json.dump(item, f)
+            
+    import asyncio
+    asyncio.run(main.load_history())
+    
+    assert len(main.requests_history) == 3
+    assert main.requests_history[0]["path"] == "/first"
+    assert main.requests_history[1]["path"] == "/second"
+    assert main.requests_history[2]["path"] == "/third"

@@ -11,6 +11,6 @@ The project is intended to run in production using `docker compose`.
 
 # Instructions for Coding Agents
 
-- You have available some tests that you should always run at the end of your implementation using `.venv/bin/pytest -s tests`
+- You have available some tests that you should always run at the end of your implementation using `uv run pytest -s tests` in the current folder (project root) without using `cd`.
 - Note that you have a virtual environment in the project root's folder `.venv`
 - Make sure to `COPY` new files in `Dockerfile`
