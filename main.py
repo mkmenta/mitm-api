@@ -24,40 +24,45 @@ analyses: dict = {}  # id -> analysis metadata
 current_analysis_id: Optional[str] = None
 redirect_endpoint: Optional[str] = os.getenv("DEFAULT_REDIRECT_ENDPOINT", None)
 
-def load_analyses_metadata():
+# Lock for synchronizing access to global state
+state_lock = asyncio.Lock()
+
+async def load_analyses_metadata():
     """Load analyses metadata from persistence directory."""
     global analyses, current_analysis_id, redirect_endpoint
-    if not os.path.exists(PERSISTENCE_DIR):
-        os.makedirs(PERSISTENCE_DIR)
-        return
-    
-    if os.path.exists(METADATA_FILE):
-        try:
-            with open(METADATA_FILE, "r") as f:
-                metadata = json.load(f)
-                analyses.update(metadata.get("analyses", {}))
-                
-                # Load current_analysis_id if present
-                if "current_analysis_id" in metadata:
-                    current_analysis_id = metadata["current_analysis_id"]
-                    # Sync redirect endpoint from the current analysis
-                    if current_analysis_id in analyses:
-                        redirect_endpoint = analyses[current_analysis_id].get("endpoint")
-        except Exception as e:
-            print(f"Error loading metadata: {e}")
+    async with state_lock:
+        if not os.path.exists(PERSISTENCE_DIR):
+            os.makedirs(PERSISTENCE_DIR)
+            return
+        
+        if os.path.exists(METADATA_FILE):
+            try:
+                with open(METADATA_FILE, "r") as f:
+                    metadata = json.load(f)
+                    analyses.update(metadata.get("analyses", {}))
+                    
+                    # Load current_analysis_id if present
+                    if "current_analysis_id" in metadata:
+                        current_analysis_id = metadata["current_analysis_id"]
+                        # Sync redirect endpoint from the current analysis
+                        if current_analysis_id in analyses:
+                            redirect_endpoint = analyses[current_analysis_id].get("endpoint")
+            except Exception as e:
+                print(f"Error loading metadata: {e}")
 
-def save_analyses_metadata():
+async def save_analyses_metadata():
     """Save analyses metadata to file."""
-    if not os.path.exists(PERSISTENCE_DIR):
-        os.makedirs(PERSISTENCE_DIR)
-    
-    try:
-        with open(METADATA_FILE, "w") as f:
-            json.dump({"analyses": analyses, "current_analysis_id": current_analysis_id}, f, indent=2)
-    except Exception as e:
-        print(f"Error saving metadata: {e}")
+    async with state_lock:
+        if not os.path.exists(PERSISTENCE_DIR):
+            os.makedirs(PERSISTENCE_DIR)
+        
+        try:
+            with open(METADATA_FILE, "w") as f:
+                json.dump({"analyses": analyses, "current_analysis_id": current_analysis_id}, f, indent=2)
+        except Exception as e:
+            print(f"Error saving metadata: {e}")
 
-def create_analysis(title: str, endpoint: str) -> dict:
+async def create_analysis(title: str, endpoint: str) -> dict:
     """Create a new analysis with unique ID."""
     analysis_id = str(uuid.uuid4())
     analysis = {
@@ -66,13 +71,15 @@ def create_analysis(title: str, endpoint: str) -> dict:
         "endpoint": endpoint,
         "created_at": datetime.now().isoformat()
     }
-    analyses[analysis_id] = analysis
     
-    # Create folder for this analysis
-    analysis_dir = os.path.join(PERSISTENCE_DIR, analysis_id)
-    os.makedirs(analysis_dir, exist_ok=True)
+    async with state_lock:
+        analyses[analysis_id] = analysis
+        
+        # Create folder for this analysis
+        analysis_dir = os.path.join(PERSISTENCE_DIR, analysis_id)
+        os.makedirs(analysis_dir, exist_ok=True)
     
-    save_analyses_metadata()
+    await save_analyses_metadata()
     return analysis
 
 def get_analysis(analysis_id: str) -> Optional[dict]:
@@ -83,58 +90,58 @@ def get_analysis_dir(analysis_id: str) -> str:
     """Get the directory path for an analysis."""
     return os.path.join(PERSISTENCE_DIR, analysis_id)
 
-def load_history():
+async def load_history():
     """Load requests history from current analysis directory."""
     global current_analysis_id
     
-    if not current_analysis_id:
-        return  # No analysis selected
-    
-    analysis_dir = get_analysis_dir(current_analysis_id)
-    if not os.path.exists(analysis_dir):
-        os.makedirs(analysis_dir)
-        return
-    
-    files = glob.glob(os.path.join(analysis_dir, "*.json"))
-    # Sort by filename (assuming filenames are numerical indices)
-    # Actually, if we name them 0.json, 1.json, etc., simple sort might fail on 10 vs 2.
-    # We should extract the integer index.
-    files.sort(key=lambda f: int(os.path.basename(f).split('.')[0]))
-    
-    requests_history.clear()
-    for f_path in files:
-        try:
-            with open(f_path, "r") as f:
-                requests_history.append(json.load(f))
-        except Exception as e:
-            print(f"Error loading {f_path}: {e}")
+    async with state_lock:
+        if not current_analysis_id:
+            return  # No analysis selected
+        
+        analysis_dir = get_analysis_dir(current_analysis_id)
+        if not os.path.exists(analysis_dir):
+            os.makedirs(analysis_dir)
+            return
+        
+        files = glob.glob(os.path.join(analysis_dir, "*.json"))
+        # Sort by filename (assuming filenames are numerical indices)
+        # Actually, if we name them 0.json, 1.json, etc., simple sort might fail on 10 vs 2.
+        # We should extract the integer index.
+        files.sort(key=lambda f: int(os.path.basename(f).split('.')[0]))
+        
+        requests_history.clear()
+        for f_path in files:
+            try:
+                with open(f_path, "r") as f:
+                    requests_history.append(json.load(f))
+            except Exception as e:
+                print(f"Error loading {f_path}: {e}")
 
-def save_request(index: int, data: dict):
+async def save_request(index: int, data: dict):
     """Save a request to the current analysis directory."""
-    global current_analysis_id
-    
-    if not current_analysis_id:
-        print("Warning: No analysis selected, skipping save")
-        return
-    
-    analysis_dir = get_analysis_dir(current_analysis_id)
-    if not os.path.exists(analysis_dir):
-        os.makedirs(analysis_dir)
-    
-    file_path = os.path.join(analysis_dir, f"{index}.json")
-    try:
-        with open(file_path, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"Error saving request {index}: {e}")
+    async with state_lock:
+        if not current_analysis_id:
+            print("Warning: No analysis selected, skipping save")
+            return
+        
+        analysis_dir = get_analysis_dir(current_analysis_id)
+        if not os.path.exists(analysis_dir):
+            os.makedirs(analysis_dir)
+        
+        file_path = os.path.join(analysis_dir, f"{index}.json")
+        try:
+            with open(file_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving request {index}: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load analyses metadata
-    load_analyses_metadata()
+    await load_analyses_metadata()
     # Load history for current analysis (if selected)
     if current_analysis_id:
-        load_history()
+        await load_history()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -150,19 +157,20 @@ requests_history = []
 @app.get("/___configure", response_class=HTMLResponse)
 async def configure(request: Request, username: str = Depends(verify_credentials)):
     """Show HTML form to configure the redirect endpoint."""
-    global current_analysis_id
-    
-    current_analysis = None
-    if current_analysis_id:
-        current_analysis = get_analysis(current_analysis_id)
-    
-    # Sort analyses by created_at for consistent display
-    sorted_analyses = sorted(analyses.values(), key=lambda a: a.get("created_at", ""), reverse=True)
-    
+    async with state_lock:
+        current_analysis = None
+        if current_analysis_id:
+            current_analysis = get_analysis(current_analysis_id)
+        
+        # Sort analyses by created_at for consistent display
+        sorted_analyses = sorted(analyses.values(), key=lambda a: a.get("created_at", ""), reverse=True)
+        
+        num_requests = len(requests_history)
+
     return templates.TemplateResponse(request, "configure.html", {
         "current_analysis": current_analysis,
         "analyses": sorted_analyses,
-        "num_requests": len(requests_history)
+        "num_requests": num_requests
     })
 
 
@@ -186,12 +194,13 @@ async def configure_post(
                 "error_message": "Title and endpoint are required to create an analysis"
             }, status_code=400)
         
-        analysis = create_analysis(title.strip(), endpoint.strip())
-        current_analysis_id = analysis["id"]
-        redirect_endpoint = analysis["endpoint"]
+        analysis = await create_analysis(title.strip(), endpoint.strip())
+        async with state_lock:
+            current_analysis_id = analysis["id"]
+            redirect_endpoint = analysis["endpoint"]
         
         # Load history for new analysis (will be empty)
-        load_history()
+        await load_history()
         
         return templates.TemplateResponse(request, "configure_success.html", {
             "message": f"Analysis '{title}' created successfully!",
@@ -206,18 +215,19 @@ async def configure_post(
                 "error_message": "Analysis ID is required to switch"
             }, status_code=400)
         
-        analysis = get_analysis(analysis_id)
-        if not analysis:
-            return templates.TemplateResponse(request, "error.html", {
-                "error_title": "Not Found",
-                "error_message": f"Analysis with ID '{analysis_id}' not found"
-            }, status_code=404)
-        
-        current_analysis_id = analysis["id"]
-        redirect_endpoint = analysis["endpoint"]
+        async with state_lock:
+            analysis = get_analysis(analysis_id)
+            if not analysis:
+                return templates.TemplateResponse(request, "error.html", {
+                    "error_title": "Not Found",
+                    "error_message": f"Analysis with ID '{analysis_id}' not found"
+                }, status_code=404)
+            
+            current_analysis_id = analysis["id"]
+            redirect_endpoint = analysis["endpoint"]
         
         # Load history for selected analysis
-        load_history()
+        await load_history()
         
         return templates.TemplateResponse(request, "configure_success.html", {
             "message": f"Switched to analysis '{analysis['title']}'",
@@ -234,34 +244,34 @@ async def configure_post(
 @app.get("/___view_last/{x}")
 async def view_last(request: Request, x: int, username: str = Depends(verify_credentials)):
     """View the last request at index x."""
-    global current_analysis_id
-    
-    current_analysis = None
-    if current_analysis_id:
-        current_analysis = get_analysis(current_analysis_id)
-    
-    if not requests_history:
-        return templates.TemplateResponse(request, "error.html", {
-            "error_title": "No Requests",
-            "error_message": "No requests recorded yet"
-        }, status_code=404)
-    
-    if x < 1 or x > len(requests_history):
-        return templates.TemplateResponse(request, "error.html", {
-            "error_title": "Error",
-            "error_message": f"Index {x} out of range. Available indices: 1-{len(requests_history)}"
-        }, status_code=404)
-    
-    # Convert 1-based index to 0-based for array access
-    index = x - 1
-    request_data = requests_history[index].copy()
+    async with state_lock:
+        current_analysis = None
+        if current_analysis_id:
+            current_analysis = get_analysis(current_analysis_id)
+        
+        if not requests_history:
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "No Requests",
+                "error_message": "No requests recorded yet"
+            }, status_code=404)
+        
+        if x < 1 or x > len(requests_history):
+            return templates.TemplateResponse(request, "error.html", {
+                "error_title": "Error",
+                "error_message": f"Index {x} out of range. Available indices: 1-{len(requests_history)}"
+            }, status_code=404)
+        
+        # Convert 1-based index to 0-based for array access
+        index = x - 1
+        request_data = requests_history[index].copy()
+        total_count = len(requests_history)
     
     # Build navigation links (using 1-based indexing)
     nav_links = []
     if x > 1:
         nav_links.append(f'<a href="/___view_last/{x-1}">← Previous</a>')
     nav_links.append('<a href="/___configure">Configuration</a>')
-    if x < len(requests_history):
+    if x < total_count:
         nav_links.append(f'<a href="/___view_last/{x+1}">Next →</a>')
     
     # Check if this is a WebSocket connection
@@ -277,7 +287,7 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
         
         return templates.TemplateResponse(request, "view_websocket.html", {
             "index": x,
-            "total_count": len(requests_history),
+            "total_count": total_count,
             "nav_links": " | ".join(nav_links),
             "timestamp": timestamp,
             "path": path,
@@ -349,7 +359,7 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
     
     return templates.TemplateResponse(request, "view_request.html", {
         "index": x,
-        "total_count": len(requests_history),
+        "total_count": total_count,
         "nav_links": " | ".join(nav_links),
         "timestamp": timestamp,
         "method": method,
@@ -369,17 +379,19 @@ async def view_last(request: Request, x: int, username: str = Depends(verify_cre
 @app.websocket("/{path:path}")
 async def websocket_endpoint(websocket: WebSocket, path: str):
     """Handle WebSocket connections and forward them to the configured endpoint with streaming support."""
-    global redirect_endpoint
-    
-    if not redirect_endpoint:
-        await websocket.close(code=1008, reason="No redirect endpoint configured")
-        return
+    async with state_lock:
+        if not redirect_endpoint:
+            await websocket.close(code=1008, reason="No redirect endpoint configured")
+            return
+        
+        # Use a local variable to avoid race conditions if redirect_endpoint changes
+        local_redirect_endpoint = redirect_endpoint
     
     # Accept the WebSocket connection
     await websocket.accept()
     
     # Parse the redirect endpoint to get WebSocket URL
-    parsed = urlparse(redirect_endpoint)
+    parsed = urlparse(local_redirect_endpoint)
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
     ws_host = parsed.netloc
     ws_path = f"{parsed.path.rstrip('/')}/{path}" if path else parsed.path.rstrip('/')
@@ -480,8 +492,11 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
     
     finally:
         # Save WebSocket session to history
-        requests_history.append(ws_data)
-        save_request(len(requests_history) - 1, ws_data)
+        async with state_lock:
+            requests_history.append(ws_data)
+            request_data_index = len(requests_history) - 1
+        
+        await save_request(request_data_index, ws_data)
         try:
             await websocket.close()
         except Exception:
@@ -491,16 +506,16 @@ async def websocket_endpoint(websocket: WebSocket, path: str):
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def catch_all(request: Request, path: str):
     """Catch all requests, save them, and forward to configured endpoint."""
-    global redirect_endpoint
-
     if path in ('favicon.ico', ):
         return Response(status_code=200)
     
-    if not redirect_endpoint:
-        return JSONResponse(
-            {"error": "No redirect endpoint configured. Please configure at /___configure"},
-            status_code=400
-        )
+    async with state_lock:
+        if not redirect_endpoint:
+            return JSONResponse(
+                {"error": "No redirect endpoint configured. Please configure at /___configure"},
+                status_code=400
+            )
+        local_redirect_endpoint = redirect_endpoint
     
     # Capture request details
     body = await request.body()
@@ -525,12 +540,14 @@ async def catch_all(request: Request, path: str):
             pass
     
     # Save to history (response will be updated after streaming completes)
-    requests_history.append(request_data)
-    request_data_index = len(requests_history) - 1
-    save_request(request_data_index, request_data)
+    async with state_lock:
+        requests_history.append(request_data)
+        request_data_index = len(requests_history) - 1
+    
+    await save_request(request_data_index, request_data)
     
     # Forward request to configured endpoint
-    target_url = f"{redirect_endpoint.rstrip('/')}/{path}" if path else redirect_endpoint.rstrip('/')
+    target_url = f"{local_redirect_endpoint.rstrip('/')}/{path}" if path else local_redirect_endpoint.rstrip('/')
     if request.query_params:
         target_url += f"?{request.query_params}"
     
@@ -595,18 +612,19 @@ async def catch_all(request: Request, path: str):
                     if needs_decompression:
                         response_body_final = decompress_body(response_body_final, content_encoding)
                     
-                    requests_history[request_data_index]["response"] = {
-                        "status_code": status_code,
-                        "headers": dict(response.headers),
-                        "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
-                    }
-                    save_request(request_data_index, requests_history[request_data_index])
+                    async with state_lock:
+                        requests_history[request_data_index]["response"] = {
+                            "status_code": status_code,
+                            "headers": dict(response.headers),
+                            "body": response_body_final.decode("utf-8", errors="replace") if response_body_final else None,
+                        }
+                    await save_request(request_data_index, requests_history[request_data_index])
                     
-                    # Try to parse response body as JSON if possible
                     if response_body_final:
                         try:
-                            requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
-                            save_request(request_data_index, requests_history[request_data_index])
+                            async with state_lock:
+                                requests_history[request_data_index]["response"]["body_json"] = json.loads(response_body_final.decode("utf-8"))
+                            await save_request(request_data_index, requests_history[request_data_index])
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             pass
                 except Exception as e:
