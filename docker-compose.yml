@@ -1,5 +1,6 @@
 services:
   mitm-api:
+    # build: .
     image: ghcr.io/mkmenta/mitm-api:latest
     pull_policy: always
     ports:
